@@ -14,7 +14,10 @@ from PyQt6.QtWidgets import (  # noqa: E402
     QGroupBox, QLabel, QMessageBox, QPushButton,
 )
 
-CTRL = Qt.Modifier.ControlModifier
+# PyQt6 (installed version) exposes Qt.Modifier.CTRL; older bindings use ControlModifier.
+# QTest.keyClick expects a KeyboardModifier, so convert via the underlying int value.
+_mod = getattr(Qt.Modifier, "CTRL", None) or getattr(Qt.Modifier, "ControlModifier")
+CTRL = Qt.KeyboardModifier(_mod.value)
 
 from app.dal.database import Transaction  # noqa: E402
 from app.ui.dialogs_misc import CategoryDialog, TemplatePickerDialog  # noqa: E402
@@ -273,9 +276,9 @@ class TestSettingsTab:
         assert "Данные и отображение" in groups
         assert "Резервные копии и откат" in groups
 
-    def test_create_backup_button(self, window, monkeypatch):
+    def test_create_backup_button(self, window, monkeypatch, tmp_path):
         # бэкапы пишем в отдельную папку этого теста (по умолчанию — рядом с БД)
-        window.service.db.set_setting("backup_path", str(Path.home() / "no_such_backups"))
+        window.service.db.set_setting("backup_path", str(tmp_path / "ui_backups"))
         window.settings_tab.load_values()
         monkeypatch.setattr(QMessageBox, "information",
                             staticmethod(lambda *a, **k: None))
@@ -285,8 +288,8 @@ class TestSettingsTab:
         name = window.settings_tab.backups_list.item(0).text()
         assert name.startswith("kaznachei_backup_") and name.endswith(".db")
 
-    def test_restore_requires_confirmation(self, window, monkeypatch):
-        window.service.db.set_setting("backup_path", str(Path.home() / "no_such_backups"))
+    def test_restore_requires_confirmation(self, window, monkeypatch, tmp_path):
+        window.service.db.set_setting("backup_path", str(tmp_path / "ui_backups"))
         window.settings_tab.load_values()
         monkeypatch.setattr(QMessageBox, "information",
                             staticmethod(lambda *a, **k: None))
