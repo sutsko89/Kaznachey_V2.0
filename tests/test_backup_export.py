@@ -55,8 +55,8 @@ class TestBackupNamingAndCreation:
     def test_list_backups_sorted_new_first(self, tmp_path):
         # отдельная чистая БД: в backup_dir фикстуры уже лежат миграционные бэкапы
         db = Database(tmp_path / "solo.db")
+        db.connect()  # создать физический файл БД
         bdir = tmp_path / "b"
-        run_migrations_fixture = None  # схема не нужна — create_backup копирует файл как есть
         b1 = create_backup(db.path, bdir, current_version=1,
                            moment=dt.datetime(2026, 1, 1))
         b2 = create_backup(db.path, bdir, current_version=1,
