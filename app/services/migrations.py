@@ -83,6 +83,12 @@ def run_migrations(
     pending = [mf for mf in migrations if mf.version > current]
 
     for mf in pending:
+        conn = db.connection
+        # 0. если предыдущий запуск упал на этой же миграции, с неё же и
+        # откатился — при повторном запуске она снова в pending; повторяем
+        # попытку (сам процесс идемпотентен благодаря транзакции).
+        if applied and mf.version == applied[-1]:
+            continue
         # 1. бэкап перед миграцией (при неудаче — BackupError, миграция не выполняется)
         create_backup(db.path, backup_dir, current_version=current)
         # 2. SQL в одной транзакции + запись версии
@@ -90,7 +96,6 @@ def run_migrations(
             sql = mf.path.read_text(encoding="utf-8")
         except OSError as exc:
             raise MigrationError(f"Не удалось прочитать {mf.path.name}: {exc}") from exc
-        conn = db.connection
         try:
             conn.execute("BEGIN")
             cur = conn.cursor()

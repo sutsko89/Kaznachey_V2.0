@@ -61,11 +61,14 @@ class Database:
                 self._conn = sqlite3.connect(str(self.path))
                 self._conn.row_factory = sqlite3.Row
                 self._conn.execute("PRAGMA foreign_keys = ON")
-                # SQLite lower()/UPPER() работают только для ASCII — для
-                # регистронезависимого поиска (в т.ч. кириллицы) регистрируем
-                # Python-функции; поиск по-прежнему выполняется на стороне SQL.
-                self._conn.create_function("UNISTR_LOWER", 1, lambda s: (s or "").lower())
-                self._conn.create_function("UNISTR_UPPER", 1, lambda s: (s or "").upper())
+                # Встроенные lower()/UPPER() в SQLite работают только для
+                # ASCII — для регистронезависимого поиска (в т.ч. кириллицы)
+                # регистрируем детерминированные Python-функции; поиск
+                # по-прежнему выполняется на стороне SQL.
+                self._conn.create_function(
+                    "UNISTR_LOWER", 1, lambda s: (s or "").lower(), deterministic=True)
+                self._conn.create_function(
+                    "UNISTR_UPPER", 1, lambda s: (s or "").upper(), deterministic=True)
             except sqlite3.Error as exc:
                 raise DatabaseError(str(exc)) from exc
         return self._conn
@@ -242,11 +245,13 @@ class Database:
         where = ["t.is_template = ?"]
         params: list = [1 if templates else 0]
         if search:
-            # Регистронезависимый поиск на стороне SQL. Для ASCII достаточно
-            # lower(); для кириллицы добавлен COLLATE NOCASE (SQLite 3.40+).
+            # Регистронезависимый поиск выполняется на стороне SQL.
+            # Встроенная lower() SQLite работает только для ASCII, поэтому
+            # используется зарегистрированная Python-функция UNISTR_LOWER
+            # (полный Unicode-lower, включая кириллицу).
             where.append(
-                "(lower(t.description) LIKE ? COLLATE NOCASE"
-                " OR lower(c.name) LIKE ? COLLATE NOCASE)"
+                "(UNISTR_LOWER(t.description) LIKE ?"
+                " OR UNISTR_LOWER(c.name) LIKE ?)"
             )
             like = f"%{search.lower()}%"
             params += [like, like]
