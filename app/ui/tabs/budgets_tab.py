@@ -206,10 +206,23 @@ class BudgetsTab(QWidget):
                     "background: palette(highlight);" if w is widget else "")
 
     def _selected_category(self) -> Category | None:
+        # Если ничего не выбрано — автоматически выбираем первую видимую
+        # категорию: кнопки «Редактировать/Удалить/Деактивировать» всегда рабочие.
         if self.selected_category_id is None:
-            QMessageBox.information(self, "Казначей", "Сначала выберите категорию.")
+            for i in range(self.list_layout.count()):
+                w = self.list_layout.itemAt(i).widget()
+                if w is not None and w.property("category_id") is not None:
+                    cid = int(w.property("category_id"))
+                    self._select(cid, w)
+                    break
+        if self.selected_category_id is None:
+            QMessageBox.information(self, "Казначей", "Нет ни одной категории.")
             return None
-        return self.service.db.get_category(self.selected_category_id)
+        cat = self.service.db.get_category(self.selected_category_id)
+        if cat is None:  # категория могла быть удалена — сбрасываем выбор
+            self.selected_category_id = None
+            QMessageBox.information(self, "Казначей", "Сначала выберите категорию.")
+        return cat
 
     def _edit_selected(self) -> None:
         cat = self._selected_category()

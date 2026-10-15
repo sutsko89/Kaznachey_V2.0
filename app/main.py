@@ -37,9 +37,25 @@ def open_database(db_path: Path | None = None) -> Database:
     path = Path(db_path) if db_path else default_db_path()
     db = Database(path)
     db.connect()  # может поднять RuntimeError, если файл удерживается другим процессом
-    backup_dir = Path(db.get_setting("backup_path") or (path.parent / "backups"))
+    # app_settings появляется только после миграции 001 — до неё читаем из
+    # sqlite_master напрямую, чтобы не упасть на "no such table: app_settings".
+    backup_dir = _read_backup_dir_raw(db, path)
     run_migrations(db, migrations_dir(), backup_dir)
     return db
+
+
+def _read_backup_dir_raw(db: Database, path: Path) -> Path:
+    """Читает backup_path из app_settings, если таблица уже существует."""
+    from app.services.migrations import _app_settings_exists
+
+    try:
+        if _app_settings_exists(db.connection):
+            value = db.get_setting("backup_path")
+            if value:
+                return Path(value)
+    except Exception:
+        pass
+    return path.parent / "backups"
 
 
 def main(argv: list[str] | None = None) -> int:
