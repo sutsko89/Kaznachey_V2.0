@@ -98,6 +98,16 @@ def run_migrations(
     current = get_current_version(db)
     pending = [mf for mf in migrations if mf.version > current]
 
+    # Читаем SQL всех ожидающих миграций ДО создания первого бэкапа: ошибка
+    # чтения файла не должна приводить к лишнему бэкапу «пустой» БД (ТЗ 9.10:
+    # бэкап нужен именно перед применением SQL, а не перед чтением файла).
+    migration_sql: dict[int, str] = {}
+    for mf in pending:
+        try:
+            migration_sql[mf.version] = mf.path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise MigrationError(f"Не удалось прочитать {mf.path.name}: {exc}") from exc
+
     for mf in pending:
         conn = db.connection
         # 0. убеждаемся, что между миграциями нет незакрытой транзакции
@@ -106,10 +116,7 @@ def run_migrations(
         # 1. бэкап перед миграцией (при неудаче — BackupError, миграция не выполняется)
         create_backup(db.path, backup_dir, current_version=current)
         # 2. SQL в одной транзакции + запись версии
-        try:
-            sql = mf.path.read_text(encoding="utf-8")
-        except OSError as exc:
-            raise MigrationError(f"Не удалось прочитать {mf.path.name}: {exc}") from exc
+        sql = migration_sql[mf.version]
         # Явно управляем транзакцией: isolation_level=None отключает авто-
         # COMMIT/автотранзакции модуля sqlite3, BEGIN/COMMIT/ROLLBACK — наши.
         old_isolation = conn.isolation_level

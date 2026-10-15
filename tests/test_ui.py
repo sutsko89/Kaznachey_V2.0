@@ -14,6 +14,8 @@ from PyQt6.QtWidgets import (  # noqa: E402
     QGroupBox, QLabel, QMessageBox, QPushButton,
 )
 
+CTRL = Qt.Modifier.ControlModifier
+
 from app.dal.database import Transaction  # noqa: E402
 from app.ui.dialogs_misc import CategoryDialog, TemplatePickerDialog  # noqa: E402
 from app.ui.dialogs_transaction import TransactionDialog  # noqa: E402
@@ -42,11 +44,12 @@ class TestMainWindow:
     @pytest.mark.parametrize("key_code,idx", [("2", 1), ("3", 2), ("4", 3), ("1", 0)])
     def test_hotkeys_switch_tabs(self, window, qtbot, key_code, idx):
         key = getattr(Qt.Key, f"Key_{key_code}")
-        qtbot.keyClick(window, key, Qt.ControlModifier)
+        qtbot.keyClick(window, key, CTRL)
         assert window.tabs.currentIndex() == idx
 
     def test_ctrl_f_focuses_search(self, window, qtbot):
-        qtbot.keyClick(window, Qt.Key.Key_F, Qt.ControlModifier)
+        window.tabs.setCurrentIndex(0)
+        qtbot.keyClick(window.transactions_tab.search_edit, Qt.Key.Key_F, CTRL)
         assert window.transactions_tab.search_edit.hasFocus()
 
 
@@ -147,7 +150,9 @@ class TestBudgetsTab:
                                    date=today)
         window.budgets_tab.refresh()
         tab = window.budgets_tab
-        assert tab.over_frame.isVisible()
+        # проверяем isHidden, а не isVisible: у дочерних виджетов скрытого
+        # контейнера isVisible() может возвращать True (Qt-семантика)
+        assert not tab.over_frame.isHidden()
         assert "Продукты" in tab.over_label.text()
         # первая строка списка — превышающая категория, подсвечена красным
         first = tab.list_layout.itemAt(0).widget()

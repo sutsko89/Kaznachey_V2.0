@@ -165,12 +165,17 @@ class TestRollbackOnError:
             "INSERT INTO nonexistent_table VALUES (1);", encoding="utf-8")
 
         db = Database(db_path)
-        applied = run_migrations(db, mig_dir, backup_dir)
-        assert applied == [1]
+        # Первая миграция применяется, вторая падает — run_migrations бросает
+        # MigrationError после ROLLBACK; уже применённая 001 остаётся.
         with pytest.raises(MigrationError, match="002_bad"):
             run_migrations(db, mig_dir, backup_dir)
         names = table_names(db)
-        assert "beta" not in names  # откат всей транзакции миграции
+        assert "alpha" in names  # успешно применённая миграция 001 сохранена
+        assert "beta" not in names  # откат всей транзакции неудачной миграции
         assert get_current_version(db) == 1
-        assert db.get_setting("db_version") == "1"
+        # Повторный запуск идемпотентен: та же ошибка, состояние не меняется
+        with pytest.raises(MigrationError, match="002_bad"):
+            run_migrations(db, mig_dir, backup_dir)
+        assert get_current_version(db) == 1
+        assert "beta" not in table_names(db)
         db.close()
