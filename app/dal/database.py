@@ -61,6 +61,11 @@ class Database:
                 self._conn = sqlite3.connect(str(self.path))
                 self._conn.row_factory = sqlite3.Row
                 self._conn.execute("PRAGMA foreign_keys = ON")
+                # SQLite lower()/UPPER() работают только для ASCII — для
+                # регистронезависимого поиска (в т.ч. кириллицы) регистрируем
+                # Python-функции; поиск по-прежнему выполняется на стороне SQL.
+                self._conn.create_function("UNISTR_LOWER", 1, lambda s: (s or "").lower())
+                self._conn.create_function("UNISTR_UPPER", 1, lambda s: (s or "").upper())
             except sqlite3.Error as exc:
                 raise DatabaseError(str(exc)) from exc
         return self._conn
@@ -237,7 +242,8 @@ class Database:
         where = ["t.is_template = ?"]
         params: list = [1 if templates else 0]
         if search:
-            where.append("(LOWER(t.description) LIKE ? OR LOWER(c.name) LIKE ?)")
+            where.append("(UNISTR_LOWER(t.description) LIKE UNISTR_LOWER(?) OR"
+                         " UNISTR_LOWER(c.name) LIKE UNISTR_LOWER(?))")
             like = f"%{search.lower()}%"
             params += [like, like]
         if date_from:

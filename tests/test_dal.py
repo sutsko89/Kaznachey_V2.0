@@ -113,7 +113,7 @@ class TestQueries:
         assert rows[0].date == "2026-10-01"
         rows2, _ = populated.list_transactions(limit=2, offset=4,
                                                order_by="date ASC, id ASC")
-        assert [r.date for r in rows2] == ["2026-10-05", "2026-10-03"]
+        assert [r.date for r in rows2] == ["2026-10-04", "2026-10-05"]
 
     def test_invalid_order_by_falls_back(self, populated: Database):
         rows, total = populated.list_transactions(order_by="; DROP TABLE transactions; --")

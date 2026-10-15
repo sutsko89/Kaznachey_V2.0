@@ -190,7 +190,9 @@ class TreasuryService:
         for key, value in fields.items():
             if key in allowed:
                 merged[key] = value
-        data = validate_transaction_fields(**merged)
+        data = validate_transaction_fields(type_=merged["type"], amount=merged["amount"],
+                                           category_id=merged["category_id"],
+                                           date=merged["date"], currency=merged["currency"])
         self._resolve_type(data["category_id"], data["type"])
         tr.type = data["type"]
         tr.amount = data["amount"]
@@ -241,7 +243,9 @@ class TreasuryService:
         for key, value in fields.items():
             if key in allowed:
                 merged[key] = value
-        data = validate_transaction_fields(date=tr.date, **merged)
+        data = validate_transaction_fields(type_=merged["type"], amount=merged["amount"],
+                                           category_id=merged["category_id"],
+                                           date=tr.date, currency=merged["currency"])
         self._resolve_type(data["category_id"], data["type"])
         tr.type = data["type"]
         tr.amount = data["amount"]
