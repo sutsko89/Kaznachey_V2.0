@@ -66,6 +66,12 @@ def get_current_version(db: Database) -> int:
     return int(r["v"]) if r and r["v"] is not None else 0
 
 
+def _app_settings_exists(conn: sqlite3.Connection) -> bool:
+    return conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='app_settings'"
+    ).fetchone() is not None
+
+
 def run_migrations(
     db: Database,
     migrations_dir: str | Path,
@@ -78,7 +84,17 @@ def run_migrations(
     """
     applied: list[int] = []
     migrations = find_migrations(migrations_dir)
+    conn0 = db.connection
+    has_app_settings_before = _app_settings_exists(conn0)
     ensure_schema_version_table(db.connection)
+    if not has_app_settings_before and _app_settings_exists(conn0):
+        # schema_version создаётся автоматически — фиксируем это в app_settings (ТЗ 6.1)
+        conn0.execute(
+            "INSERT INTO app_settings (key, value) VALUES ('db_version', ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (str(get_current_version(db)),),
+        )
+        conn0.commit()
     current = get_current_version(db)
     pending = [mf for mf in migrations if mf.version > current]
 
@@ -94,6 +110,10 @@ def run_migrations(
             sql = mf.path.read_text(encoding="utf-8")
         except OSError as exc:
             raise MigrationError(f"Не удалось прочитать {mf.path.name}: {exc}") from exc
+        # Явно управляем транзакцией: isolation_level=None отключает авто-
+        # COMMIT/автотранзакции модуля sqlite3, BEGIN/COMMIT/ROLLBACK — наши.
+        old_isolation = conn.isolation_level
+        conn.isolation_level = None
         try:
             conn.execute("BEGIN")
             cur = conn.cursor()
@@ -104,20 +124,28 @@ def run_migrations(
                 "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
                 (mf.version, now),
             )
-            conn.commit()
+            # 3. дублируем версию в app_settings (ТЗ 6.1). Если миграция создала
+            # таблицу app_settings — пишем версию сразу в той же транзакции; если
+            # таблицы нет (произвольные тестовые наборы) — версия остаётся только
+            # в schema_version.
+            if _app_settings_exists(conn):
+                cur.execute(
+                    "INSERT INTO app_settings (key, value) VALUES ('db_version', ?)"
+                    " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (str(mf.version),),
+                )
+            conn.execute("COMMIT")
         except sqlite3.Error as exc:
-            conn.rollback()
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
             raise MigrationError(
                 f"Миграция {mf.path.name} не выполнена, изменения откачены: {exc}"
             ) from exc
-        # 3. дублируем версию в app_settings (ТЗ 6.1). Таблица app_settings может
-        # отсутствовать в произвольных тестовых наборах миграций — тогда версия
-        # остаётся только в schema_version. Пишем напрямую через connection, чтобы
-        # не зависеть от внутреннего режима транзакций Database.
-        row = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='app_settings'"
-        ).fetchone()
-        if row is not None:
+        finally:
+            conn.isolation_level = old_isolation
+        # Post-hoc: если app_settings появилась вне основной транзакции или была
+        # пуста до миграции, обновим db_version напрямую.
+        if _app_settings_exists(conn):
             conn.execute(
                 "INSERT INTO app_settings (key, value) VALUES ('db_version', ?)"
                 " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
