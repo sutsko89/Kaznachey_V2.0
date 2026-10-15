@@ -95,10 +95,18 @@ def test_startup_under_budget(tmp_path):
 
 
 def test_search_fast(big_db: Database):
-    results, elapsed = _timed(lambda: big_db.list_transactions(search="ТакСИ слОВО"))
+    (rows, total), elapsed = _timed(lambda: big_db.list_transactions(search="ТАКСИ"))
     _append(f"Поиск подстроки по {TX_COUNT} записей: {elapsed:.3f} с")
-    assert results[1] > 0
+    assert total > 0
     assert elapsed < SEARCH_BUDGET_S
+
+
+def test_search_mixed_case_cyrillic(big_db: Database):
+    """Регистронезависимость кириллицы в поиске на стороне SQL (ТЗ 9.5)."""
+    _, t_upper = big_db.list_transactions(search="ТАКСИ")
+    _, t_mixed = big_db.list_transactions(search="ТакСИ")
+    _, t_lower = big_db.list_transactions(search="такси")
+    assert t_upper == t_mixed == t_lower > 0
 
 
 def test_search_cyrillic_by_category(big_db: Database):

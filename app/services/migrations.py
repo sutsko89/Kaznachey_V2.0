@@ -84,6 +84,9 @@ def run_migrations(
 
     for mf in pending:
         conn = db.connection
+        # 0. убеждаемся, что между миграциями нет незакрытой транзакции
+        if conn.in_transaction:
+            conn.commit()
         # 1. бэкап перед миграцией (при неудаче — BackupError, миграция не выполняется)
         create_backup(db.path, backup_dir, current_version=current)
         # 2. SQL в одной транзакции + запись версии
