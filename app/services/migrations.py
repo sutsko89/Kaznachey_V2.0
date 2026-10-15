@@ -107,8 +107,13 @@ def run_migrations(
             raise MigrationError(
                 f"Миграция {mf.path.name} не выполнена, изменения откачены: {exc}"
             ) from exc
-        # 3. дублируем версию в app_settings
-        db.set_setting("db_version", str(mf.version))
+        # 3. дублируем версию в app_settings (таблица может ещё не существовать —
+        # например, в тестовых миграциях без 001_init.sql; версия в таком случае
+        # остаётся только в schema_version)
+        try:
+            db.set_setting("db_version", str(mf.version))
+        except Exception:
+            pass
         applied.append(mf.version)
         current = mf.version
     return applied
