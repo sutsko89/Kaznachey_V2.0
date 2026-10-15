@@ -33,14 +33,15 @@ class BudgetsTab(QWidget):
         top = QHBoxLayout()
         top.addWidget(QLabel("Месяц:"))
         self.month_combo = QComboBox()
-        today = dt.date.today()
+        self._ready = False  # блокирует refresh() до окончания инициализации вкладки
+        today = dt.date.today().replace(day=1)
         for year in range(today.year - 1, today.year + 1):
             for m in range(1, 13):
                 self.month_combo.addItem(f"{MONTH_NAMES[m - 1]} {year}", f"{year:04d}-{m:02d}")
         idx = self.month_combo.findData(today.strftime("%Y-%m"))
         if idx >= 0:
             self.month_combo.setCurrentIndex(idx)
-        self.month_combo.currentIndexChanged.connect(self.refresh)
+        self.month_combo.currentIndexChanged.connect(self._on_month_changed)
         top.addWidget(self.month_combo)
         top.addStretch(1)
         layout.addLayout(top)
@@ -54,7 +55,8 @@ class BudgetsTab(QWidget):
         over_layout = QVBoxLayout(self.over_frame)
         over_layout.setContentsMargins(8, 4, 8, 4)
         over_layout.addWidget(self.over_label)
-        self.over_frame.hide()
+        # скрытие произойдёт в refresh(); hide() здесь нельзя — при инициализации
+        # виджета isVisible() возвращает True независимо от вызова hide()
         layout.addWidget(self.over_frame)
 
         # ---- кнопки управления категориями ----
@@ -92,11 +94,16 @@ class BudgetsTab(QWidget):
 
         self.selected_category_id: int | None = None
         self._buttons_row = buttons
+        self._ready = True
         self.refresh()
 
     # ---------- выбор месяца ----------
     def current_month(self) -> str:
         return self.month_combo.currentData()
+
+    def _on_month_changed(self, *_args) -> None:
+        if getattr(self, "_ready", False):
+            self.refresh()
 
     # ---------- обновление ----------
     def refresh(self) -> None:

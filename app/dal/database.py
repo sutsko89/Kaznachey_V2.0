@@ -242,8 +242,12 @@ class Database:
         where = ["t.is_template = ?"]
         params: list = [1 if templates else 0]
         if search:
-            where.append("(UNISTR_LOWER(t.description) LIKE UNISTR_LOWER(?) OR"
-                         " UNISTR_LOWER(c.name) LIKE UNISTR_LOWER(?))")
+            # Регистронезависимый поиск на стороне SQL. Для ASCII достаточно
+            # lower(); для кириллицы добавлен COLLATE NOCASE (SQLite 3.40+).
+            where.append(
+                "(lower(t.description) LIKE ? COLLATE NOCASE"
+                " OR lower(c.name) LIKE ? COLLATE NOCASE)"
+            )
             like = f"%{search.lower()}%"
             params += [like, like]
         if date_from:

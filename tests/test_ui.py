@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import pytest
+from pathlib import Path
 
 pytest.importorskip("pytestqt")
 
@@ -41,11 +42,11 @@ class TestMainWindow:
     @pytest.mark.parametrize("key_code,idx", [("2", 1), ("3", 2), ("4", 3), ("1", 0)])
     def test_hotkeys_switch_tabs(self, window, qtbot, key_code, idx):
         key = getattr(Qt.Key, f"Key_{key_code}")
-        qtbot.keyClick(window, key, Qt.Modifier.Control)
+        qtbot.keyClick(window, key, Qt.ControlModifier)
         assert window.tabs.currentIndex() == idx
 
     def test_ctrl_f_focuses_search(self, window, qtbot):
-        qtbot.keyClick(window, Qt.Key.Key_F, Qt.Modifier.Control)
+        qtbot.keyClick(window, Qt.Key.Key_F, Qt.ControlModifier)
         assert window.transactions_tab.search_edit.hasFocus()
 
 
@@ -254,19 +255,23 @@ class TestTemplatesTab:
 class TestSettingsTab:
     def test_no_security_controls(self, window):
         """В настройках нет ПИН/пароля/входа/регистрации (ТЗ 11.6)."""
-        all_texts = " ".join(
-            w.text() for w in window.settings_tab.findChildren(
-                (QLabel, QPushButton, QGroupBox)))
+        widgets = [w for w in window.settings_tab.findChildren(
+            (QLabel, QPushButton)) if hasattr(w, "text")]
+        groups = [g.title() for g in window.settings_tab.findChildren(QGroupBox)]
+        all_texts = " ".join([w.text() for w in widgets] + groups)
         lowered = all_texts.lower()
         for forbidden in ("пин", "пароль", "регистр", "вход", "пользовател"):
             assert forbidden not in lowered
 
     def test_blocks_present(self, window):
-        groups = [g.text() for g in window.settings_tab.findChildren(QGroupBox)]
+        groups = [g.title() for g in window.settings_tab.findChildren(QGroupBox)]
         assert "Данные и отображение" in groups
         assert "Резервные копии и откат" in groups
 
     def test_create_backup_button(self, window, monkeypatch):
+        # бэкапы пишем в отдельную папку этого теста (по умолчанию — рядом с БД)
+        window.service.db.set_setting("backup_path", str(Path.home() / "no_such_backups"))
+        window.settings_tab.load_values()
         monkeypatch.setattr(QMessageBox, "information",
                             staticmethod(lambda *a, **k: None))
         ok = window.settings_tab.create_backup()
@@ -276,6 +281,8 @@ class TestSettingsTab:
         assert name.startswith("kaznachei_backup_") and name.endswith(".db")
 
     def test_restore_requires_confirmation(self, window, monkeypatch):
+        window.service.db.set_setting("backup_path", str(Path.home() / "no_such_backups"))
+        window.settings_tab.load_values()
         monkeypatch.setattr(QMessageBox, "information",
                             staticmethod(lambda *a, **k: None))
         window.settings_tab.create_backup()

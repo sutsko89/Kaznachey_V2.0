@@ -107,13 +107,20 @@ def run_migrations(
             raise MigrationError(
                 f"Миграция {mf.path.name} не выполнена, изменения откачены: {exc}"
             ) from exc
-        # 3. дублируем версию в app_settings (таблица может ещё не существовать —
-        # например, в тестовых миграциях без 001_init.sql; версия в таком случае
-        # остаётся только в schema_version)
-        try:
-            db.set_setting("db_version", str(mf.version))
-        except Exception:
-            pass
+        # 3. дублируем версию в app_settings (ТЗ 6.1). Таблица app_settings может
+        # отсутствовать в произвольных тестовых наборах миграций — тогда версия
+        # остаётся только в schema_version. Пишем напрямую через connection, чтобы
+        # не зависеть от внутреннего режима транзакций Database.
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='app_settings'"
+        ).fetchone()
+        if row is not None:
+            conn.execute(
+                "INSERT INTO app_settings (key, value) VALUES ('db_version', ?)"
+                " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (str(mf.version),),
+            )
+            conn.commit()
         applied.append(mf.version)
         current = mf.version
     return applied
