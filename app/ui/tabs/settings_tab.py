@@ -22,6 +22,7 @@ class SettingsTab(QWidget):
         super().__init__(parent)
         self.service = service
         self.restart_requested = False
+        self.on_saved = None  # колбэк мгновенного применения темы/масштаба
 
         layout = QVBoxLayout(self)
 
@@ -132,11 +133,11 @@ class SettingsTab(QWidget):
         except (ValidationError, DatabaseError) as exc:
             QMessageBox.critical(self, "Казначей", str(exc))
             return
-        old_scale = None  # масштаб/тема применяются после перезапуска
-        self.restart_requested = True
+        if self.on_saved is not None:
+            self.on_saved()
         QMessageBox.information(
             self, "Казначей",
-            "Настройки сохранены. Тема и масштаб будут применены после перезапуска приложения.",
+            "Настройки сохранены. Тема и масштаб применены сразу.",
         )
 
     # ---------- бэкапы ----------

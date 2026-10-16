@@ -20,6 +20,9 @@ _mod = getattr(Qt.Modifier, "CTRL", None) or getattr(Qt.Modifier, "ControlModifi
 CTRL = Qt.KeyboardModifier(_mod.value)
 
 from app.dal.database import Transaction  # noqa: E402
+from app.domain.service import format_amount_ru  # noqa: E402
+from app.ui.tabs.dashboard_tab import (  # noqa: E402
+    INCOME_COLOR_DARK, INCOME_COLOR_LIGHT)
 from app.ui.dialogs_misc import CategoryDialog, TemplatePickerDialog  # noqa: E402
 from app.ui.dialogs_transaction import TransactionDialog  # noqa: E402
 from app.ui.main_window import MainWindow  # noqa: E402
@@ -35,16 +38,17 @@ def window(qtbot, db, service):
 
 class TestMainWindow:
     def test_opens_without_login(self, window):
-        """Нет экрана входа: сразу главное окно с четырьмя вкладками."""
+        """Нет экрана входа: сразу главное окно; вкладки по ТЗ + Дашборд."""
         assert window.windowTitle() == "Казначей"
         tabs = [window.tabs.tabText(i) for i in range(window.tabs.count())]
-        assert tabs == ["Операции", "Бюджеты и категории", "Шаблоны", "Настройки"]
+        assert tabs == ["Операции", "Бюджеты и категории", "Дашборд",
+                        "Шаблоны", "Настройки"]
 
     def test_minimum_size(self, window):
         m = window.minimumSize()
         assert m.width() >= 1000 and m.height() >= 700
 
-    @pytest.mark.parametrize("key_code,idx", [("2", 1), ("3", 2), ("4", 3), ("1", 0)])
+    @pytest.mark.parametrize("key_code,idx", [("2", 1), ("3", 2), ("4", 4), ("1", 0)])
     def test_hotkeys_switch_tabs(self, window, qtbot, key_code, idx):
         key = getattr(Qt.Key, f"Key_{key_code}")
         qtbot.keyClick(window, key, CTRL)
@@ -345,3 +349,102 @@ class TestCategoryDialog:
         assert not dlg.type_combo.isEnabled()
         assert any("Тип нельзя изменить" in w.text()
                    for w in dlg.findChildren(QLabel))
+
+
+class TestDashboardTab:
+    """Вкладка «Дашборд»: сводка доходов/расходов с выбором периода."""
+
+    def test_tab_present(self, window):
+        assert window.tabs.tabText(2) == "Дашборд"
+
+    def test_summary_cards(self, window, service, category, income_category):
+        service.create_transaction(type_="expense", amount=400.5,
+                                   category_id=category.id, date=service.today())
+        service.create_transaction(type_="income", amount=1000.0,
+                                   category_id=income_category.id, date=service.today())
+        window._refresh_all()
+        tab = window.dashboard_tab
+        assert tab.lbl_income.text() == format_amount_ru(1000.0)
+        assert tab.lbl_expense.text() == format_amount_ru(400.5)
+        assert tab.lbl_balance.text() == format_amount_ru(599.5)
+
+    def test_period_modes_ranges(self, window, service):
+        import datetime as dt
+        tab = window.dashboard_tab
+        today = dt.date.today()
+        # текущий месяц
+        tab.period_combo.setCurrentIndex(0)
+        d1, d2 = tab.current_range()
+        assert d1 == today.replace(day=1).isoformat()
+        assert d2 >= today.isoformat()
+        # предыдущий месяц
+        tab.period_combo.setCurrentIndex(1)
+        d1, d2 = tab.current_range()
+        assert d2 < today.replace(day=1).isoformat()
+        # год
+        tab.period_combo.setCurrentIndex(3)
+        d1, d2 = tab.current_range()
+        assert d1.startswith(str(today.year)) and d2.endswith("-12-31")
+
+    def test_specific_month_selection(self, window, service, category):
+        service.create_transaction(type_="expense", amount=111.0,
+                                   category_id=category.id, date="2026-08-15")
+        tab = window.dashboard_tab
+        idx = tab.period_combo.findData("month")
+        tab.period_combo.setCurrentIndex(idx)
+        m_idx = tab.month_combo.findData("2026-08")
+        assert m_idx >= 0
+        tab.month_combo.setCurrentIndex(m_idx)
+        assert tab.lbl_expense.text() == format_amount_ru(111.0)
+        # переключение на другой месяц — данные меняются
+        tab.month_combo.setCurrentIndex(tab.month_combo.findData("2026-07"))
+        assert tab.lbl_expense.text() == format_amount_ru(0.0)
+
+    def test_custom_period_validation(self, window, qtbot, monkeypatch):
+        tab = window.dashboard_tab
+        tab.period_combo.setCurrentIndex(tab.period_combo.findData("custom"))
+        tab.start_edit.setText("2026-10-10")
+        tab.end_edit.setText("2026-10-01")  # начало позже конца
+        shown = {}
+        def fake_warning(*a, **k):
+            shown["text"] = a[2] if len(a) > 2 else ""
+        monkeypatch.setattr("app.ui.tabs.dashboard_tab.QMessageBox.warning",
+                            staticmethod(fake_warning))
+        tab.refresh()
+        assert "период" in shown.get("text", "").lower() or shown
+
+    def test_breakdown_tables(self, window, service, category, income_category):
+        service.create_transaction(type_="expense", amount=300.0,
+                                   category_id=category.id, date=service.today())
+        service.create_transaction(type_="expense", amount=100.0,
+                                   category_id=category.id, date=service.today())
+        service.create_transaction(type_="income", amount=500.0,
+                                   category_id=income_category.id, date=service.today())
+        window._refresh_all()
+        tab = window.dashboard_tab
+        te = tab.table_expenses
+        assert te.rowCount() == 1
+        assert te.item(0, 1).text() == format_amount_ru(400.0)
+        assert te.item(0, 2).text() == "100.0%"
+        ti = tab.table_incomes
+        assert ti.rowCount() == 1
+        assert ti.item(0, 1).text() == format_amount_ru(500.0)
+
+    def test_templates_not_counted(self, window, service, category):
+        service.create_template_from_data(type_="expense", amount=999.0,
+                                          category_id=category.id)
+        window._refresh_all()
+        assert window.dashboard_tab.lbl_expense.text() == format_amount_ru(0.0)
+
+    def test_bars_widget_updated(self, window, service, category):
+        service.create_transaction(type_="expense", amount=50.0,
+                                   category_id=category.id, date=service.today())
+        window._refresh_all()
+        data = window.dashboard_tab.bars._data
+        assert data and sum(v for _, v, _ in data) + sum(v for _, _, v in data) > 0
+
+    def test_theme_colors_apply(self, window, service):
+        window.dashboard_tab.apply_theme(True)
+        assert window.dashboard_tab.bars.income_color == INCOME_COLOR_DARK
+        window.dashboard_tab.apply_theme(False)
+        assert window.dashboard_tab.bars.income_color == INCOME_COLOR_LIGHT

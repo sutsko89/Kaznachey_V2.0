@@ -26,6 +26,7 @@ from app.services.export import export_transactions_csv
 from app.ui.dialogs_misc import CategoryDialog, TemplatePickerDialog
 from app.ui.dialogs_transaction import TransactionDialog
 from app.ui.tabs.budgets_tab import BudgetsTab
+from app.ui.tabs.dashboard_tab import DashboardTab
 from app.ui.tabs.settings_tab import SettingsTab
 from app.ui.tabs.templates_tab import TemplatesTab
 from app.ui.tabs.transactions_tab import TransactionsTab
@@ -47,7 +48,6 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Казначей")
         self.resize(1000, 700)
         self.setMinimumSize(1000, 700)
-        self._apply_theme_and_scale()
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -69,12 +69,16 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.tabs)
         self.transactions_tab = TransactionsTab(self.service)
         self.budgets_tab = BudgetsTab(self.service)
+        self.dashboard_tab = DashboardTab(self.service)
         self.templates_tab = TemplatesTab(self.service)
         self.settings_tab = SettingsTab(self.service)
         self.tabs.addTab(self.transactions_tab, "Операции")
         self.tabs.addTab(self.budgets_tab, "Бюджеты и категории")
+        self.tabs.addTab(self.dashboard_tab, "Дашборд")
         self.tabs.addTab(self.templates_tab, "Шаблоны")
         self.tabs.addTab(self.settings_tab, "Настройки")
+        # тема применяется после создания всех вкладок (для цветов дашборда)
+        self._apply_theme_and_scale()
 
         # ---- колбэки вкладок ----
         self.transactions_tab.on_add = self.add_transaction
@@ -88,6 +92,7 @@ class MainWindow(QMainWindow):
         self.budgets_tab.on_edit_category = self.edit_category
         self.templates_tab.on_add_template = self.add_template
         self.templates_tab.on_edit_template = self.edit_template
+        self.settings_tab.on_saved = self.on_settings_saved
 
         # ---- горячие клавиши ----
         self._setup_shortcuts()
@@ -95,8 +100,10 @@ class MainWindow(QMainWindow):
     # ---------- тема и масштаб ----------
     def _apply_theme_and_scale(self) -> None:
         theme = self.service.get_setting("theme", "light")
-        if theme == "dark":
-            self.setStyleSheet(DARK_QSS)
+        dark = theme == "dark"
+        self.setStyleSheet(DARK_QSS if dark else "")
+        if hasattr(self, "dashboard_tab"):
+            self.dashboard_tab.apply_theme(dark)
         try:
             scale = int(self.service.get_setting("ui_scale", "100"))
         except ValueError:
@@ -105,6 +112,12 @@ class MainWindow(QMainWindow):
             font = self.font()
             font.setPointSizeF(font.pointSizeF() * scale / 100.0)
             self.setFont(font)
+
+    def on_settings_saved(self) -> None:
+        """Мгновенное применение сохранённой темы/масштаба без перезапуска."""
+        self._apply_theme_and_scale()
+        self.transactions_tab.refresh()
+        self.budgets_tab.refresh()
 
     def _setup_shortcuts(self) -> None:
         def sc(seq: str, slot) -> None:
@@ -120,7 +133,8 @@ class MainWindow(QMainWindow):
         sc("Ctrl+1", lambda: self.tabs.setCurrentIndex(0))
         sc("Ctrl+2", lambda: self.tabs.setCurrentIndex(1))
         sc("Ctrl+3", lambda: self.tabs.setCurrentIndex(2))
-        sc("Ctrl+4", lambda: self.tabs.setCurrentIndex(3))
+        sc("Ctrl+4", lambda: self.tabs.setCurrentIndex(4))
+        sc("Ctrl+5", lambda: self.tabs.setCurrentIndex(3))
 
     # ---------- операции ----------
     def _refresh_all(self) -> None:
@@ -128,6 +142,7 @@ class MainWindow(QMainWindow):
         self.transactions_tab.refresh()
         self.budgets_tab.refresh()
         self.templates_tab.refresh()
+        self.dashboard_tab.refresh()
 
     def add_transaction(self) -> None:
         dlg = TransactionDialog(self.service, self)
