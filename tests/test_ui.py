@@ -449,3 +449,48 @@ class TestDashboardTab:
         assert window.dashboard_tab.bars.income_color == INCOME_COLOR_DARK
         window.dashboard_tab.apply_theme(False)
         assert window.dashboard_tab.bars.income_color == INCOME_COLOR_LIGHT
+
+    def test_dashboard_subtabs_and_daily_breakdown(self, window, service, category, income_category):
+        """Дашборд: три подвкладки; для месяца — разбивка по дням с суммами."""
+        tab = window.dashboard_tab
+        assert [tab.sub_tabs.tabText(i) for i in range(tab.sub_tabs.count())] == [
+            "Обзор", "Расходы по категориям", "Доходы по категориям"]
+        import datetime as dt
+        today = dt.date.today()
+        d1 = f"{today.year}-{today.month:02d}-02"
+        d2 = f"{today.year}-{today.month:02d}-04"
+        service.create_transaction(type_="expense", amount=150.0,
+                                   category_id=category.id, date=d1)
+        service.create_transaction(type_="income", amount=700.0,
+                                   category_id=income_category.id, date=d2)
+        window._refresh_all()
+        # график обзора — по дням месяца (все дни периода)
+        assert len(tab.bars._data) >= 28
+        assert tab.overview_title.text().startswith("Динамика по дням")
+        # таблица разбивки по дням с суммами
+        rows = {tab.table_daily.item(i, 0).text(): (
+                    tab.table_daily.item(i, 1).text(),
+                    tab.table_daily.item(i, 2).text())
+                for i in range(tab.table_daily.rowCount())}
+        from app.domain.service import format_amount_ru, to_display_date
+        assert rows[to_display_date(d1)] == (format_amount_ru(0.0), format_amount_ru(150.0))
+        assert rows[to_display_date(d2)] == (format_amount_ru(700.0), format_amount_ru(0.0))
+
+    def test_dashboard_category_pages_chart_and_percent(self, window, service, category, income_category):
+        """Подвкладки категорий: суммы в валюте и проценты + данные графика."""
+        service.create_transaction(type_="expense", amount=300.0,
+                                   category_id=category.id, date=service.today())
+        service.create_transaction(type_="expense", amount=100.0,
+                                   category_id=category.id, date=service.today())
+        service.create_transaction(type_="income", amount=500.0,
+                                   category_id=income_category.id, date=service.today())
+        window._refresh_all()
+        tab = window.dashboard_tab
+        te = tab.table_expenses
+        from app.domain.service import format_amount_ru
+        assert te.item(0, 1).text() == format_amount_ru(400.0)
+        assert te.item(0, 2).text() == "100.0%"
+        assert tab.chart_expenses._rows[0] == ("Продукты", 400.0, 100.0)
+        ti = tab.table_incomes
+        assert ti.item(0, 1).text() == format_amount_ru(500.0)
+        assert tab.chart_incomes._rows[0][2] == 100.0

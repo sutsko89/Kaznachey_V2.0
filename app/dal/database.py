@@ -327,6 +327,22 @@ class Database:
         expense = float(row["expense"])
         return {"income": income, "expense": expense, "balance": income - expense}
 
+    def daily_totals(self, *, date_from: str, date_to: str) -> list[dict]:
+        """Разбивка доходов/расходов по дням периода (шаблоны не учитываются)."""
+        rows = self.connection.execute(
+            "SELECT date,"
+            " COALESCE(SUM(CASE WHEN type='income' THEN amount ELSE 0 END), 0) AS income,"
+            " COALESCE(SUM(CASE WHEN type='expense' THEN amount ELSE 0 END), 0) AS expense"
+            " FROM transactions WHERE is_template = 0 AND date >= ? AND date <= ?"
+            " GROUP BY date ORDER BY date",
+            (date_from, date_to),
+        ).fetchall()
+        return [
+            {"date": r["date"], "income": float(r["income"]),
+             "expense": float(r["expense"])}
+            for r in rows
+        ]
+
     def spent_by_category(self, month: str) -> dict[int, float]:
         """Суммы расходов по категориям за месяц 'YYYY-MM' (шаблоны не учитываются)."""
         rows = self.connection.execute(

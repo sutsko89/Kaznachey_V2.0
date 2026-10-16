@@ -289,6 +289,14 @@ class TreasuryService:
             raise ValidationError({"date_from": "Начало периода позже его конца"})
         return self.db.period_totals(date_from=date_from, date_to=date_to)
 
+    def daily_breakdown(self, date_from: str, date_to: str) -> list[dict]:
+        """Разбивка доходов/расходов по дням периода (для дашборда)."""
+        validate_date(date_from)
+        validate_date(date_to)
+        if date_from > date_to:
+            raise ValidationError({"date_from": "Начало периода позже его конца"})
+        return self.db.daily_totals(date_from=date_from, date_to=date_to)
+
     def category_report(self, date_from: str, date_to: str) -> list[dict]:
         """Отчёт по категориям: сумма, доля %, остаток лимита (для расходов за месяц)."""
         rows = self.db.category_report(date_from, date_to)
