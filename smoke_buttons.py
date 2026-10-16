@@ -295,10 +295,10 @@ def main() -> int:
     # В offscreen-режиме QApplication.quit() не скрывает окно, поэтому
     # завершение приложения проверяем через факт закрытия соединения с БД
     # (quit_after_restore сначала закрывает БД).
-    db_was_open = service.db.conn is not None
+    db_was_open = service.db._conn is not None
     restored = s_tab.restore_selected_backup()
     check("«Восстановить из выбранного бэкапа» подтверждает и завершает работу",
-          restored and db_was_open and service.db.conn is None)
+          restored and db_was_open and service.db._conn is None)
     old_files = list(tmp.glob("kaznachei_old_*.db"))
     check("откат переименовал текущую БД в kaznachei_old_<timestamp>.db",
           len(old_files) >= 1)
