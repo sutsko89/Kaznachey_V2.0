@@ -315,11 +315,12 @@ class TestSettingsTab:
         monkeypatch.setattr(QMessageBox, "information",
                             staticmethod(lambda *a, **k: None))
         tab = window.settings_tab
-        tab.theme_combo.setCurrentIndex(1)   # тёмная
+        assert tab.theme_combo.count() == 1          # светлая — единственная тема
+        assert tab.theme_combo.itemText(0) == "Светлая"
         tab.scale_combo.setCurrentText("125%")
         tab.page_size_combo.setCurrentText("25")
         tab.btn_save_settings.click()
-        assert tab.service.get_setting("theme") == "dark"
+        assert tab.service.get_setting("theme") == "light"
         assert tab.service.get_setting("ui_scale") == "125"
         assert tab.service.get_setting("page_size") == "25"
 

@@ -25,6 +25,8 @@ class SettingsTab(QWidget):
         self.on_saved = None  # колбэк мгновенного применения темы/масштаба
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(10)
 
         # ---------- Данные и отображение ----------
         data_group = QGroupBox("Данные и отображение")
@@ -52,17 +54,21 @@ class SettingsTab(QWidget):
 
         self.scale_combo = QComboBox()
         self.scale_combo.addItems(["100%", "125%", "150%"])
-        form.addRow("Масштаб интерфейса (после перезапуска):", self.scale_combo)
+        form.addRow("Масштаб интерфейса:", self.scale_combo)
 
+        # тема единственная — светлая; выбор тёмной удалён из UI.
+        # theme_combo оставлен как read-only индикатор для обратной совместимости тестов.
         self.theme_combo = QComboBox()
-        self.theme_combo.addItems(["Светлая", "Тёмная"])
-        form.addRow("Тема интерфейса (после перезапуска):", self.theme_combo)
+        self.theme_combo.addItems(["Светлая"])
+        form.addRow("Тема интерфейса:", self.theme_combo)
 
         self.page_size_combo = QComboBox()
         self.page_size_combo.addItems(["25", "50"])
         form.addRow("Строк на страницу:", self.page_size_combo)
 
         self.btn_save_settings = QPushButton("Сохранить настройки")
+        self.btn_save_settings.setObjectName("primaryButton")
+        self.btn_save_settings.setMinimumHeight(36)
         self.btn_save_settings.clicked.connect(self._save_settings)
         layout.addWidget(self.btn_save_settings)
 
@@ -81,9 +87,14 @@ class SettingsTab(QWidget):
         bform.addRow("Папка для бэкапов:", backup_dir_row)
 
         btns = QHBoxLayout()
+        btns.setSpacing(8)
         self.btn_create_backup = QPushButton("Создать бэкап")
+        self.btn_create_backup.setObjectName("primaryButton")
         self.btn_restore = QPushButton("Восстановить из выбранного бэкапа")
+        self.btn_restore.setObjectName("dangerButton")
         self.btn_refresh_backups = QPushButton("Обновить список")
+        for b in (self.btn_create_backup, self.btn_restore, self.btn_refresh_backups):
+            b.setMinimumHeight(34)
         btns.addWidget(self.btn_create_backup)
         btns.addWidget(self.btn_restore)
         btns.addWidget(self.btn_refresh_backups)
@@ -110,8 +121,8 @@ class SettingsTab(QWidget):
         idx = self.scale_combo.findText(f"{scale}%")
         if idx >= 0:
             self.scale_combo.setCurrentIndex(idx)
-        theme = s.get_setting("theme", "light")
-        self.theme_combo.setCurrentIndex(1 if theme == "dark" else 0)
+        # светлая — единственная тема
+        self.theme_combo.setCurrentIndex(0)
         ps = s.get_setting("page_size", "50")
         idx = self.page_size_combo.findText(ps)
         if idx >= 0:
@@ -126,7 +137,7 @@ class SettingsTab(QWidget):
             s.set_setting("date_format", self.date_format_combo.currentText())
             s.set_setting("number_format", "ru")
             s.set_setting("ui_scale", self.scale_combo.currentText().rstrip("%"))
-            s.set_setting("theme", "dark" if self.theme_combo.currentIndex() == 1 else "light")
+            s.set_setting("theme", "light")  # светлая тема — единственная
             s.set_setting("page_size", self.page_size_combo.currentText())
             raw = self.backup_dir_edit.text().strip()
             s.set_setting("backup_path", str(Path(raw).expanduser()) if raw else "")
@@ -137,7 +148,7 @@ class SettingsTab(QWidget):
             self.on_saved()
         QMessageBox.information(
             self, "Казначей",
-            "Настройки сохранены. Тема и масштаб применены сразу.",
+            "Настройки сохранены. Масштаб применён сразу (тема — светлая).",
         )
 
     # ---------- бэкапы ----------

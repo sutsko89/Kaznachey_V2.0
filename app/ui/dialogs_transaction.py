@@ -33,7 +33,11 @@ class TransactionDialog(QDialog):
         self.setModal(True)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 14)
+        layout.setSpacing(10)
         form = QFormLayout()
+        form.setHorizontalSpacing(14)
+        form.setVerticalSpacing(9)
         layout.addLayout(form)
 
         # тип

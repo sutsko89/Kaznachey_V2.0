@@ -69,6 +69,8 @@ def main(argv: list[str] | None = None) -> int:
 
     app = QApplication(sys.argv[:1])
     app.setApplicationName("Казначей")
+    from app.ui.theme import apply_light_theme
+    apply_light_theme(app)  # светлая тема — единственная
     try:
         db = open_database(db_path)
     except RuntimeError as exc:

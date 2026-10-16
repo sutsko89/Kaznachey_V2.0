@@ -25,6 +25,8 @@ class CategoryDialog(QDialog):
         self.setModal(True)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 14)
+        layout.setSpacing(10)
         form = QFormLayout()
         layout.addLayout(form)
 

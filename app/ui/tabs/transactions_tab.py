@@ -4,6 +4,7 @@ from __future__ import annotations
 import datetime as dt
 
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QAbstractItemView, QComboBox, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QMessageBox, QPushButton, QTableWidget, QTableWidgetItem,
@@ -13,6 +14,7 @@ from PyQt6.QtWidgets import (
 from app.dal.database import Transaction
 from app.domain.service import TreasuryService, format_amount_ru, to_display_date
 from app.errors import DatabaseError
+from app.ui.theme import EXPENSE_COLOR, INCOME_COLOR
 
 
 class TransactionsTab(QWidget):
@@ -27,11 +29,16 @@ class TransactionsTab(QWidget):
         self.rows_cache: list[Transaction] = []
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(10)
 
         # ---- верхняя панель: поиск + фильтры + кнопки ----
         top = QHBoxLayout()
+        top.setSpacing(8)
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Поиск по описанию или категории…")
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.setMinimumHeight(34)
         self.search_edit.textChanged.connect(self._on_filter_changed)
         top.addWidget(self.search_edit, stretch=2)
 
@@ -40,27 +47,36 @@ class TransactionsTab(QWidget):
         self.date_to_edit = QLineEdit()
         self.date_to_edit.setPlaceholderText("по дд.мм.гггг")
         for e in (self.date_from_edit, self.date_to_edit):
+            e.setMinimumHeight(34)
+            e.setMaximumWidth(120)
             e.editingFinished.connect(self._on_filter_changed)
             top.addWidget(e)
 
         self.type_filter = QComboBox()
+        self.type_filter.setMinimumHeight(34)
         self.type_filter.addItems(["Все типы", "Доход", "Расход"])
         self.type_filter.currentIndexChanged.connect(self._on_filter_changed)
         top.addWidget(self.type_filter)
 
         self.category_filter = QComboBox()
+        self.category_filter.setMinimumHeight(34)
+        self.category_filter.setMinimumWidth(150)
         self.category_filter.currentIndexChanged.connect(self._on_filter_changed)
         top.addWidget(self.category_filter)
 
         layout.addLayout(top)
 
         buttons = QHBoxLayout()
-        self.btn_add = QPushButton("Добавить")
+        buttons.setSpacing(8)
+        self.btn_add = QPushButton("+ Добавить")
+        self.btn_add.setObjectName("primaryButton")
         self.btn_template = QPushButton("По шаблону")
-        self.btn_export = QPushButton("Экспорт")
+        self.btn_export = QPushButton("Экспорт CSV")
         self.btn_edit = QPushButton("Редактировать")
         self.btn_delete = QPushButton("Удалить")
+        self.btn_delete.setObjectName("dangerButton")
         for b in (self.btn_add, self.btn_template, self.btn_export, self.btn_edit, self.btn_delete):
+            b.setMinimumHeight(34)
             buttons.addWidget(b)
         buttons.addStretch(1)
         layout.addLayout(buttons)
@@ -79,6 +95,8 @@ class TransactionsTab(QWidget):
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setDefaultSectionSize(32)
         self.table.doubleClicked.connect(lambda *_: self._edit_current())
         for col, order in ((0, "date"), (3, "amount")):
             hh = self.table.horizontalHeaderItem(col)
@@ -91,8 +109,8 @@ class TransactionsTab(QWidget):
 
         # ---- пагинация ----
         pager = QHBoxLayout()
-        self.btn_prev = QPushButton("← Назад")
-        self.btn_next = QPushButton("Вперёд →")
+        self.btn_prev = QPushButton("‹ Назад")
+        self.btn_next = QPushButton("Вперёд ›")
         self.page_label = QLabel("стр. 1")
         self.btn_prev.clicked.connect(self._prev_page)
         self.btn_next.clicked.connect(self._next_page)
@@ -187,10 +205,8 @@ class TransactionsTab(QWidget):
                     item.setTextAlignment(
                         Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
                     )
-                    item.setForeground(
-                        Qt.GlobalColor.darkGreen if tr.type == "income"
-                        else Qt.GlobalColor.darkRed
-                    )
+                    item.setForeground(QColor(INCOME_COLOR if tr.type == "income"
+                                              else EXPENSE_COLOR))
                 self.table.setItem(i, j, item)
         pages = max(1, (total + self.page_size() - 1) // self.page_size())
         self.page_label.setText(f"стр. {self.page + 1} из {pages}")

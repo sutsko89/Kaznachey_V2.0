@@ -21,12 +21,18 @@ class TemplatesTab(QWidget):
         self.on_edit_template = None
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(10)
 
         buttons = QHBoxLayout()
-        self.btn_add = QPushButton("Добавить")
+        buttons.setSpacing(8)
+        self.btn_add = QPushButton("+ Добавить")
+        self.btn_add.setObjectName("primaryButton")
         self.btn_edit = QPushButton("Редактировать")
         self.btn_delete = QPushButton("Удалить")
+        self.btn_delete.setObjectName("dangerButton")
         for b in (self.btn_add, self.btn_edit, self.btn_delete):
+            b.setMinimumHeight(34)
             buttons.addWidget(b)
         buttons.addStretch(1)
         layout.addLayout(buttons)
@@ -40,6 +46,8 @@ class TemplatesTab(QWidget):
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setDefaultSectionSize(32)
         self.table.doubleClicked.connect(lambda *_: self._edit_selected())
         layout.addWidget(self.table, stretch=1)
 

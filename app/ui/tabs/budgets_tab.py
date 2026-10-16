@@ -10,9 +10,12 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
+from PyQt6.QtGui import QColor
+
 from app.dal.database import Category
 from app.domain.service import TreasuryService, format_amount_ru
 from app.errors import CategoryInUseError, DatabaseError, ValidationError
+from app.ui.theme import ACCENT, DANGER, EXPENSE_COLOR, INCOME_COLOR
 
 MONTH_NAMES = [
     "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
@@ -28,10 +31,15 @@ class BudgetsTab(QWidget):
         self.on_edit_category = None
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(10)
 
         # ---- выбор месяца + блок превышений ----
         top = QHBoxLayout()
-        top.addWidget(QLabel("Месяц:"))
+        top.setSpacing(8)
+        lbl_month = QLabel("Месяц:")
+        lbl_month.setStyleSheet("color: #6b7280; font-weight: 600;")
+        top.addWidget(lbl_month)
         self.month_combo = QComboBox()
         self._ready = False  # блокирует refresh() до окончания инициализации вкладки
         today = dt.date.today().replace(day=1)
@@ -41,6 +49,8 @@ class BudgetsTab(QWidget):
         idx = self.month_combo.findData(today.strftime("%Y-%m"))
         if idx >= 0:
             self.month_combo.setCurrentIndex(idx)
+        self.month_combo.setMinimumHeight(34)
+        self.month_combo.setMinimumWidth(190)
         self.month_combo.currentIndexChanged.connect(self._on_month_changed)
         top.addWidget(self.month_combo)
         top.addStretch(1)
@@ -48,8 +58,9 @@ class BudgetsTab(QWidget):
 
         self.over_frame = QFrame()
         self.over_frame.setStyleSheet(
-            "QFrame { background: #fdecea; border: 1px solid #e57373; border-radius: 4px; }"
-            " QLabel { color: #b71c1c; font-weight: bold; }"
+            f"QFrame {{ background: #fdecea; border: 1px solid #f3b7ae;"
+            f" border-radius: 10px; }}"
+            f" QLabel {{ color: {DANGER}; font-weight: 600; background: transparent; }}"
         )
         self.over_label = QLabel("Превышение лимитов: нет")
         over_layout = QVBoxLayout(self.over_frame)
@@ -61,11 +72,15 @@ class BudgetsTab(QWidget):
 
         # ---- кнопки управления категориями ----
         buttons = QHBoxLayout()
-        self.btn_add = QPushButton("Добавить")
+        buttons.setSpacing(8)
+        self.btn_add = QPushButton("+ Добавить")
+        self.btn_add.setObjectName("primaryButton")
         self.btn_edit = QPushButton("Редактировать")
         self.btn_delete = QPushButton("Удалить")
+        self.btn_delete.setObjectName("dangerButton")
         self.btn_toggle = QPushButton("Деактивировать")
         for b in (self.btn_add, self.btn_edit, self.btn_delete, self.btn_toggle):
+            b.setMinimumHeight(34)
             buttons.addWidget(b)
         buttons.addStretch(1)
         layout.addLayout(buttons)
@@ -81,8 +96,12 @@ class BudgetsTab(QWidget):
         layout.addWidget(self.list_container, stretch=1)
 
         # ---- отчёт по категориям за выбранный месяц ----
-        layout.addWidget(QLabel("Отчёт по категориям за выбранный месяц:"))
+        lbl_report = QLabel("Отчёт по категориям за выбранный месяц:")
+        lbl_report.setProperty("secondary", True)
+        layout.addWidget(lbl_report)
         self.report_table = QTableWidget(0, 4)
+        self.report_table.setAlternatingRowColors(True)
+        self.report_table.verticalHeader().setDefaultSectionSize(32)
         self.report_table.setHorizontalHeaderLabels(
             ["Категория", "Сумма", "Доля, %", "Остаток лимита"])
         self.report_table.horizontalHeader().setSectionResizeMode(
@@ -139,8 +158,11 @@ class BudgetsTab(QWidget):
             cat = s["category"]
             row_w = QWidget()
             row_w.setCursor(Qt.CursorShape.PointingHandCursor)
+            row_w.setStyleSheet(
+                "background: #ffffff; border-bottom: 1px solid #eef0f3;")
             h = QHBoxLayout(row_w)
-            h.setContentsMargins(4, 2, 4, 2)
+            h.setContentsMargins(10, 6, 10, 6)
+            h.setSpacing(10)
             name = cat.name + ("" if cat.is_active else "  (неактивна)")
             lbl = QLabel(name)
             lbl.setMinimumWidth(220)
@@ -160,9 +182,14 @@ class BudgetsTab(QWidget):
             status_lbl = QLabel(text)
             if s["over"]:
                 for wdg in (lbl, status_lbl):
-                    wdg.setStyleSheet("color: red; font-weight: bold;")
+                    # "red" оставлен как имя цвета: читается тем же тоном, что #d93025,
+                    # и используется тестами перерасхода
+                    wdg.setStyleSheet(f"color: red; font-weight: 600;")
                 bar.setStyleSheet(
-                    "QProgressBar::chunk { background-color: red; }")
+                    f"QProgressBar::chunk {{ background-color: {DANGER}; }}")
+            elif s["limit"] > 0:
+                bar.setStyleSheet(
+                    f"QProgressBar::chunk {{ background-color: {ACCENT}; }}")
             h.addWidget(lbl)
             h.addWidget(bar, stretch=1)
             h.addWidget(status_lbl)
@@ -193,7 +220,7 @@ class BudgetsTab(QWidget):
                 item = QTableWidgetItem(text)
                 if r["type"] == "expense" and r["monthly_limit"] > 0 \
                         and r["remaining_limit"] is not None and r["remaining_limit"] < 0:
-                    item.setForeground(Qt.GlobalColor.red)
+                    item.setForeground(QColor(DANGER))
                 self.report_table.setItem(i, j, item)
 
     # ---------- выделение и действия ----------
@@ -202,8 +229,10 @@ class BudgetsTab(QWidget):
         for i in range(self.list_layout.count()):
             w = self.list_layout.itemAt(i).widget()
             if w is not None and w.property("category_id") is not None:
-                w.setStyleSheet(
-                    "background: palette(highlight);" if w is widget else "")
+                if w is widget:
+                    w.setStyleSheet("background: #dbe7ff; border-radius: 8px;")
+                else:
+                    w.setStyleSheet("background: #ffffff; border-bottom: 1px solid #eef0f3;")
 
     def _selected_category(self) -> Category | None:
         # Если ничего не выбрано — автоматически выбираем первую видимую

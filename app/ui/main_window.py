@@ -31,15 +31,6 @@ from app.ui.tabs.settings_tab import SettingsTab
 from app.ui.tabs.templates_tab import TemplatesTab
 from app.ui.tabs.transactions_tab import TransactionsTab
 
-DARK_QSS = """
-QWidget { background-color: #2b2b2b; color: #dddddd; }
-QLineEdit, QComboBox, QTableWidget, QListWidget { background-color: #3c3f41; color: #dddddd; }
-QPushButton { background-color: #4a4e51; color: #dddddd; padding: 4px 10px; }
-QProgressBar { background-color: #3c3f41; color: #dddddd; border: 1px solid #555; }
-QGroupBox { border: 1px solid #555; margin-top: 8px; }
-"""
-
-
 class MainWindow(QMainWindow):
     def __init__(self, db: Database):
         super().__init__()
@@ -49,17 +40,30 @@ class MainWindow(QMainWindow):
         self.resize(1000, 700)
         self.setMinimumSize(1000, 700)
 
+        # светлая тема применяется к приложению целиком (если QApplication уже создан)
+        qapp = QApplication.instance()
+        if qapp is not None:
+            from app.ui.theme import apply_light_theme
+            apply_light_theme(qapp)
+
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
+        layout.setContentsMargins(16, 12, 16, 14)
+        layout.setSpacing(10)
 
         # ---- верхняя панель ----
         top = QHBoxLayout()
+        top.setSpacing(10)
         title = QLabel("Казначей")
-        title.setStyleSheet("font-size: 16pt; font-weight: bold;")
+        title.setObjectName("appTitle")
         top.addWidget(title)
+        subtitle = QLabel("личные финансы офлайн")
+        subtitle.setObjectName("appSubtitle")
+        top.addWidget(subtitle)
         top.addStretch(1)
         self.btn_exit = QPushButton("Выход")
+        self.btn_exit.setObjectName("exitButton")
         self.btn_exit.clicked.connect(self.close)
         top.addWidget(self.btn_exit)
         layout.addLayout(top)
@@ -77,8 +81,8 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.dashboard_tab, "Дашборд")
         self.tabs.addTab(self.templates_tab, "Шаблоны")
         self.tabs.addTab(self.settings_tab, "Настройки")
-        # тема применяется после создания всех вкладок (для цветов дашборда)
-        self._apply_theme_and_scale()
+        # масштаб интерфейса (светлая тема — единственная, применяется на старте)
+        self._apply_scale()
 
         # ---- колбэки вкладок ----
         self.transactions_tab.on_add = self.add_transaction
@@ -97,25 +101,29 @@ class MainWindow(QMainWindow):
         # ---- горячие клавиши ----
         self._setup_shortcuts()
 
-    # ---------- тема и масштаб ----------
-    def _apply_theme_and_scale(self) -> None:
-        theme = self.service.get_setting("theme", "light")
-        dark = theme == "dark"
-        self.setStyleSheet(DARK_QSS if dark else "")
-        if hasattr(self, "dashboard_tab"):
-            self.dashboard_tab.apply_theme(dark)
+    # ---------- масштаб ----------
+    def _apply_scale(self) -> None:
         try:
             scale = int(self.service.get_setting("ui_scale", "100"))
         except ValueError:
             scale = 100
-        if scale != 100:
-            font = self.font()
-            font.setPointSizeF(font.pointSizeF() * scale / 100.0)
-            self.setFont(font)
+        qapp = QApplication.instance()
+        base = getattr(self, "_base_font_px", None)
+        if base is None:
+            base = 14.0
+            self._base_font_px = base
+        px = max(6.0, base * scale / 100.0)
+        if qapp is not None:
+            f = qapp.font()
+            f.setPixelSize(int(round(px)))
+            qapp.setFont(f)
+        f2 = self.font()
+        f2.setPixelSize(int(round(px)))
+        self.setFont(f2)
 
     def on_settings_saved(self) -> None:
-        """Мгновенное применение сохранённой темы/масштаба без перезапуска."""
-        self._apply_theme_and_scale()
+        """Мгновенное применение сохранённого масштаба без перезапуска."""
+        self._apply_scale()
         self.transactions_tab.refresh()
         self.budgets_tab.refresh()
 

@@ -13,7 +13,7 @@ import calendar
 import datetime as dt
 
 from PyQt6.QtCore import QRectF, Qt
-from PyQt6.QtGui import QColor, QPainter
+from PyQt6.QtGui import QColor, QFont, QPainter
 from PyQt6.QtWidgets import (
     QAbstractItemView, QComboBox, QFrame, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QMessageBox, QPushButton, QTableWidget, QTableWidgetItem,
@@ -22,16 +22,19 @@ from PyQt6.QtWidgets import (
 
 from app.domain.service import TreasuryService, format_amount_ru
 from app.errors import ValidationError
+from app.ui.theme import (ACCENT, BORDER, CARD_BG, EXPENSE_COLOR, INCOME_COLOR,
+                          MUTED, TEXT)
 
 MONTH_NAMES = [
     "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
     "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
 ]
 
-INCOME_COLOR_LIGHT = "#1b7a2f"
-EXPENSE_COLOR_LIGHT = "#b3261e"
-INCOME_COLOR_DARK = "#6ee87c"
-EXPENSE_COLOR_DARK = "#ff8a80"
+# светлая тема — единственная; палитра берётся из app.ui.theme
+INCOME_COLOR_LIGHT = INCOME_COLOR
+EXPENSE_COLOR_LIGHT = EXPENSE_COLOR
+INCOME_COLOR_DARK = INCOME_COLOR
+EXPENSE_COLOR_DARK = EXPENSE_COLOR
 
 
 def _month_options() -> list[tuple[str, str]]:
@@ -53,9 +56,15 @@ class SectionFrame(QFrame):
     def __init__(self, title: str, parent=None):
         super().__init__(parent)
         self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setStyleSheet(
+            f"SectionFrame {{ background: {CARD_BG}; border: 1px solid {BORDER};"
+            f" border-radius: 10px; }}")
         outer = QVBoxLayout(self)
+        outer.setContentsMargins(12, 10, 12, 10)
+        outer.setSpacing(6)
         lbl = QLabel(title)
-        lbl.setStyleSheet("font-weight: bold;")
+        lbl.setStyleSheet(f"font-weight: 600; color: {TEXT}; font-size: 14px;"
+                          f" background: transparent;")
         outer.addWidget(lbl)
         self.inner = QVBoxLayout()
         outer.addLayout(self.inner)
@@ -86,43 +95,59 @@ class MonthlyBarsWidget(QWidget):
         w, h = self.width(), self.height()
         n = len(self._data)
         if n == 0:
-            painter.setPen(QColor("#888888"))
+            painter.setPen(QColor(MUTED))
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
                              "Нет данных за выбранный период")
             return
         max_val = max([v for row in self._data for v in row[1:]] + [1.0])
         label_h = 30
-        chart_h = max(h - label_h - 10, 10)
+        chart_h = max(h - label_h - 14, 10)
         group_w = w / n
-        bar_w = max(6.0, min(26.0, group_w * 0.32))
+        bar_w = max(6.0, min(24.0, group_w * 0.30))
+        radius = min(4.0, bar_w / 2)
+        # базовая линия
+        painter.setPen(QColor(BORDER))
+        painter.drawLine(0, int(8 + chart_h), w, int(8 + chart_h))
+        f = painter.font()
+        f.setPointSizeF(max(8.0, f.pointSizeF() - 1))
+        painter.setFont(f)
         for i, (label, income, expense) in enumerate(self._data):
             cx = i * group_w + group_w / 2
             inc_h = chart_h * (income / max_val)
             exp_h = chart_h * (expense / max_val)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(self.income_color))
-            painter.drawRect(QRectF(cx - bar_w - 1, 6 + (chart_h - inc_h), bar_w, inc_h))
+            painter.drawRoundedRect(
+                QRectF(cx - bar_w - 2, 8 + (chart_h - inc_h), bar_w, inc_h),
+                radius, radius)
             painter.setBrush(QColor(self.expense_color))
-            painter.drawRect(QRectF(cx + 1, 6 + (chart_h - exp_h), bar_w, exp_h))
-            painter.setPen(QColor("#909090"))
+            painter.drawRoundedRect(
+                QRectF(cx + 2, 8 + (chart_h - exp_h), bar_w, exp_h),
+                radius, radius)
+            painter.setPen(QColor(MUTED))
             short = label.replace(" ", "\n", 1)
             painter.drawText(
                 QRectF(i * group_w, h - label_h, group_w, label_h),
                 Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, short)
-        painter.setPen(QColor("#909090"))
-        painter.drawLine(0, int(6 + chart_h), w, int(6 + chart_h))
 
 
 def _make_card(title: str, color: str | None = None) -> tuple[QFrame, QLabel]:
     frame = QFrame()
-    frame.setFrameShape(QFrame.Shape.StyledPanel)
+    frame.setObjectName("summaryCard")
+    frame.setStyleSheet(
+        f"#summaryCard {{ background: {CARD_BG}; border: 1px solid {BORDER};"
+        f" border-radius: 12px; }}"
+        f"#summaryCard QLabel {{ background: transparent; border: none; }}")
     lay = QVBoxLayout(frame)
+    lay.setContentsMargins(16, 12, 16, 12)
+    lay.setSpacing(4)
     lbl_title = QLabel(title)
-    lbl_title.setStyleSheet("font-weight: bold;")
+    lbl_title.setStyleSheet(
+        f"color: {MUTED}; font-size: 12px; font-weight: 600; letter-spacing: 1px;")
     value = QLabel("0,00")
-    style = "font-size: 14pt; font-weight: bold;"
+    style = f"font-size: 22px; font-weight: 700; color: {TEXT};"
     if color:
-        style += f" color: {color};"
+        style = f"font-size: 22px; font-weight: 700; color: {color};"
     value.setStyleSheet(style)
     lay.addWidget(lbl_title)
     lay.addWidget(value)
@@ -139,11 +164,18 @@ class DashboardTab(QWidget):
         self._ready = False
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(10)
 
         # ---- выбор периода ----
         top = QHBoxLayout()
-        top.addWidget(QLabel("Период:"))
+        top.setSpacing(8)
+        lbl_period = QLabel("Период:")
+        lbl_period.setStyleSheet(f"color: {MUTED}; font-weight: 600;")
+        top.addWidget(lbl_period)
         self.period_combo = QComboBox()
+        self.period_combo.setMinimumHeight(34)
+        self.period_combo.setMinimumWidth(190)
         self.period_combo.addItem("Текущий месяц", "current_month")
         self.period_combo.addItem("Предыдущий месяц", "prev_month")
         self.period_combo.addItem("Текущий квартал", "quarter")
@@ -154,6 +186,7 @@ class DashboardTab(QWidget):
         top.addWidget(self.period_combo)
 
         self.month_combo = QComboBox()
+        self.month_combo.setMinimumHeight(34)
         for text, data in _month_options():
             self.month_combo.addItem(text, data)
         self.month_combo.setVisible(False)
@@ -161,12 +194,14 @@ class DashboardTab(QWidget):
 
         self.lbl_from = QLabel("с")
         self.start_edit = QLineEdit(dt.date.today().replace(day=1).isoformat())
-        self.start_edit.setPlaceholderText("YYYY-MM-DD")
-        self.start_edit.setFixedWidth(100)
+        self.start_edit.setPlaceholderText("ДД.ММ.ГГГГ или YYYY-MM-DD")
+        self.start_edit.setMinimumHeight(34)
+        self.start_edit.setFixedWidth(130)
         self.lbl_to = QLabel("по")
         self.end_edit = QLineEdit(dt.date.today().isoformat())
-        self.end_edit.setPlaceholderText("YYYY-MM-DD")
-        self.end_edit.setFixedWidth(100)
+        self.end_edit.setPlaceholderText("ДД.ММ.ГГГГ или YYYY-MM-DD")
+        self.end_edit.setMinimumHeight(34)
+        self.end_edit.setFixedWidth(130)
         self.lbl_from.setVisible(False)
         self.start_edit.setVisible(False)
         self.lbl_to.setVisible(False)
@@ -177,6 +212,8 @@ class DashboardTab(QWidget):
         top.addWidget(self.end_edit)
 
         self.btn_apply = QPushButton("Применить")
+        self.btn_apply.setObjectName("primaryButton")
+        self.btn_apply.setMinimumHeight(34)
         self.btn_apply.clicked.connect(self.refresh)
         top.addWidget(self.btn_apply)
         top.addStretch(1)
@@ -184,10 +221,13 @@ class DashboardTab(QWidget):
 
         # ---- карточки итогов ----
         cards = QHBoxLayout()
-        self.card_income, self.lbl_income = _make_card("Доходы", INCOME_COLOR_LIGHT)
-        self.card_expense, self.lbl_expense = _make_card("Расходы", EXPENSE_COLOR_LIGHT)
-        self.card_balance, self.lbl_balance = _make_card("Баланс")
-        self._balance_base_style = "font-size: 14pt; font-weight: bold;"
+        cards.setSpacing(10)
+        self.card_income, self.lbl_income = _make_card("ДОХОДЫ", INCOME_COLOR_LIGHT)
+        self.card_expense, self.lbl_expense = _make_card("РАСХОДЫ", EXPENSE_COLOR_LIGHT)
+        self.card_balance, self.lbl_balance = _make_card("БАЛАНС")
+        self._balance_base_style = f"font-size: 22px; font-weight: 700; color: {TEXT};"
+        self._balance_pos_style = f"font-size: 22px; font-weight: 700; color: {INCOME_COLOR};"
+        self._balance_neg_style = f"font-size: 22px; font-weight: 700; color: {EXPENSE_COLOR};"
         cards.addWidget(self.card_income)
         cards.addWidget(self.card_expense)
         cards.addWidget(self.card_balance)
@@ -234,6 +274,9 @@ class DashboardTab(QWidget):
         t.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         t.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         t.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        t.verticalHeader().setVisible(False)
+        t.setAlternatingRowColors(True)
+        t.verticalHeader().setDefaultSectionSize(30)
         return t
 
     # ---------- выбор периода ----------
@@ -326,13 +369,12 @@ class DashboardTab(QWidget):
         self.lbl_income.setText(format_amount_ru(income))
         self.lbl_expense.setText(format_amount_ru(expense))
         self.lbl_balance.setText(format_amount_ru(balance))
-        base = self._balance_base_style
         if balance < 0:
-            self.lbl_balance.setStyleSheet(base + f" color: {EXPENSE_COLOR_LIGHT};")
+            self.lbl_balance.setStyleSheet(self._balance_neg_style)
         elif balance > 0:
-            self.lbl_balance.setStyleSheet(base + f" color: {INCOME_COLOR_LIGHT};")
+            self.lbl_balance.setStyleSheet(self._balance_pos_style)
         else:
-            self.lbl_balance.setStyleSheet(base)
+            self.lbl_balance.setStyleSheet(self._balance_base_style)
 
         self._fill_breakdown(self.table_expenses, report, "expense")
         self._fill_breakdown(self.table_incomes, report, "income")
