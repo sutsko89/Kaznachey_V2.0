@@ -78,13 +78,10 @@ class TemplatesTab(QWidget):
         row = self.table.currentRow()
         if 0 <= row < len(self.rows_cache):
             tpl = self.rows_cache[row]
-        elif self.table.count() == 0:
-            QMessageBox.information(self, "Казначей", "Сначала выберите шаблон.")
-            return
         else:
             QMessageBox.information(self, "Казначей", "Сначала выберите шаблон.")
             return
-        if tpl is not None and self.on_edit_template:
+        if self.on_edit_template:
             self.on_edit_template(tpl)
 
     def _delete_selected(self) -> None:

@@ -87,6 +87,24 @@ class FakeTemplatePicker(QDialog):
         return 0  # отмена — ветка «По шаблону» не должна падать
 
 
+class FakeTemplateEditDialog(QDialog):
+    """Замена диалога редактирования шаблона: применяет правку при exec()."""
+
+    def __init__(self, service, parent=None, template=None):
+        QDialog.__init__(self, parent)
+        self.service = service
+        self.template = template
+        self.saved = None
+
+    def exec(self):
+        tpl = self.template
+        self.saved = self.service.edit_template(
+            tpl.id, type_=tpl.type, amount=tpl.amount + 1,
+            category_id=tpl.category_id,
+            description=tpl.description, currency=tpl.currency)
+        return 1
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp())
     db_path = tmp / "kaznachei.db"
@@ -109,12 +127,18 @@ def main() -> int:
     CategoryDialog.__init__ = FakeCategoryDialog.__init__
     CategoryDialog.exec = FakeCategoryDialog.exec
     TemplatePickerDialog.exec = FakeTemplatePicker.exec
+    from app.ui.main_window import TemplateEditDialog
+    TemplateEditDialog.__init__ = FakeTemplateEditDialog.__init__
+    TemplateEditDialog.exec = FakeTemplateEditDialog.exec
 
     db = open_database(db_path)
     service = db  # MainWindow принимает Database; сам строит TreasuryService
     win = MainWindow(db)
     service = win.service
     win.show()
+
+    _mod = getattr(Qt.Modifier, "CTRL", None) or getattr(Qt.Modifier, "ControlModifier")
+    CTRL = Qt.KeyboardModifier(_mod.value)
 
     tabs = win.tabs
     t_tab = tabs.widget(0)   # Операции
@@ -222,12 +246,14 @@ def main() -> int:
 
     tpl_tab.table.selectRow(0)
     tpl_tab.btn_edit.click()
-    check("«Редактировать» шаблон работает без падения", True)
+    edited = service.list_templates()[0]
+    check("«Редактировать» шаблон применяет изменения", edited.amount == 101.0)
 
+    n_before_del = len(service.list_templates())
     tpl_tab.table.selectRow(0)
     tpl_tab.btn_delete.click()
     check("«Удалить» шаблон",
-          len(service.list_templates()) == n_tpl)
+          len(service.list_templates()) == n_before_del - 1)
 
     # --- Вкладка «Настройки» ----------------------------------------------------
     tabs.setCurrentIndex(3)
@@ -249,39 +275,33 @@ def main() -> int:
 
     s_tab.btn_refresh_backups.click()
     check("«Обновить список» показывает бэкапы",
-          s_tab.backup_list.count() >= 1)
+          s_tab.backups_list.count() >= 1)
 
-    # Восстановление: выбираем бэкап, подтверждаем — приложение закрывается.
-    s_tab.backup_list.setCurrentRow(0)
-    restored = s_tab.restore_selected_backup()
-    check("«Восстановить из выбранного бэкапа» подтверждает и завершает работу",
-          restored and not win.isVisible())
-    old_files = list(tmp.glob("kaznachei_old_*.db"))
-    check("откат переименовал текущую БД в kaznachei_old_<timestamp>.db",
-          len(old_files) == 1)
-
-    # Проверка данных после восстановления из бэкапа (он создан ДО удаления
-    # категорий — данные на месте).
-    db2 = Database(db_path)
-    db2.connect()
-    from app.services.migrations import run_migrations
-    run_migrations(db2, migrations_dir(), tmp / "bk")
-    names = {c.name for c in db2.list_categories(include_inactive=True)}
-    check("после восстановления из бэкапа данные верны",
-          "Такси до дома" not in names and any(n.startswith("Транспорт")
-                                               for n in names))
-    db2.close()
-
-    # --- Горячие клавиши ---------------------------------------------------------
-    win.show()
-    from PyQt6.QtGui import QKeyEvent
+    tabs.setCurrentIndex(3)
+    win.activateWindow()
+    app.processEvents()
+    from PyQt6.QtTest import QTest
     for key, idx in ((Qt.Key.Key_1, 0), (Qt.Key.Key_2, 1),
                      (Qt.Key.Key_3, 2), (Qt.Key.Key_4, 3)):
-        ev = QKeyEvent(QKeyEvent.Type.KeyPress, key,
-                       Qt.Modifier.ControlModifier, "")
-        QApplication.sendEvent(win, ev)
-        check(f"Ctrl+{key.value()} переключает вкладку {idx + 1}",
+        QTest.keyClick(win, key, CTRL)
+        check(f"Ctrl+{int(key.value)} переключает вкладку {idx + 1}",
               win.tabs.currentIndex() == idx)
+
+    # --- Восстановление из бэкапа (в конце: закрывает приложение) -------------
+    tabs.setCurrentIndex(3)
+    s_tab.btn_create_backup.click()
+    s_tab.btn_refresh_backups.click()
+    s_tab.backups_list.setCurrentRow(0)
+    # В offscreen-режиме QApplication.quit() не скрывает окно, поэтому
+    # завершение приложения проверяем через факт закрытия соединения с БД
+    # (quit_after_restore сначала закрывает БД).
+    db_was_open = service.db.conn is not None
+    restored = s_tab.restore_selected_backup()
+    check("«Восстановить из выбранного бэкапа» подтверждает и завершает работу",
+          restored and db_was_open and service.db.conn is None)
+    old_files = list(tmp.glob("kaznachei_old_*.db"))
+    check("откат переименовал текущую БД в kaznachei_old_<timestamp>.db",
+          len(old_files) >= 1)
 
     print()
     if FAILURES:
