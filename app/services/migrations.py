@@ -99,26 +99,41 @@ def run_migrations(db, migrations_dir: str | Path, backup_dir: str | Path) -> li
         if version <= current:
             continue
         sql = path.read_text(encoding="utf-8")
-        # 1. Резервная копия до изменения схемы (если в файле БД уже есть
-        #    данные; пустой/неполный файл sqlite3.backup не создаёт).
-        if _db_file_has_content(db.path):
-            try:
-                create_backup(db.path, backup_dir, current_version=current)
-            except BackupError:
-                raise
-            except Exception as exc:
-                raise BackupError(str(exc)) from exc
+        # 1. Резервная копия ДО изменения схемы и до любой записи в файл БД.
+        #    Если на диске ещё нет файла с содержимым (первый запуск),
+        #    создаём эталонный пустой файл SQLite — от него тоже делается
+        #    бэкап, что гарантирует «бэкап перед каждой миграцией» (ТЗ 6.3).
+        if not _db_file_has_content(db.path):
+            empty = sqlite3.connect(str(db.path))
+            empty.close()
+        try:
+            create_backup(db.path, backup_dir, current_version=current)
+        except BackupError:
+            raise
+        except Exception as exc:
+            raise BackupError(str(exc)) from exc
         # 2. FR-13: проверка foreign-currency до изменения схемы.
         _assert_rub_only(conn, version, path.name)
         # 3. Атомарное применение.
         try:
-            conn.execute("BEGIN")
+            # Пересоздание таблиц (миграция 003) при включённых FK вызывает
+            # ложные нарушения ссылочной целостности; на время миграции FK
+            # отключаются, после успеха запускается quick_check.
+            conn.execute("PRAGMA foreign_keys = OFF")
             try:
-                _exec_migration_sql(conn, sql)
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    _exec_migration_sql(conn, sql)
+                    conn.execute("COMMIT")
+                except Exception:
+                    conn.execute("ROLLBACK")
+                    raise
+            finally:
+                conn.execute("PRAGMA foreign_keys = ON")
+            row = conn.execute("PRAGMA quick_check").fetchone()
+            if not row or row[0] != "ok":
+                raise MigrationError(
+                    f"Миграция {path.name} нарушила целостность БД: {row}")
         except sqlite3.Error as exc:
             raise MigrationError(
                 f"Миграция {path.name} не выполнена; изменения откачены: {exc}"
@@ -128,6 +143,7 @@ def run_migrations(db, migrations_dir: str | Path, backup_dir: str | Path) -> li
         #    Так фиксация версии не входит в откатываемую транзакцию самой
         #    миграции и не мешает проверке «бэкап до любой записи в БД».
         try:
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS schema_version ("
                 " version INTEGER NOT NULL PRIMARY KEY,"
@@ -145,8 +161,12 @@ def run_migrations(db, migrations_dir: str | Path, backup_dir: str | Path) -> li
                     " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                     (str(version),),
                 )
-            conn.commit()
+            conn.execute("COMMIT")
         except sqlite3.Error as exc:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
             raise MigrationError(
                 f"Не удалось зафиксировать версию {version}: {exc}"
             ) from exc

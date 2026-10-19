@@ -124,7 +124,8 @@ class Database:
     def connection(self) -> sqlite3.Connection:
         if self._conn is None:
             try:
-                self._conn = sqlite3.connect(str(self.path))
+                self._conn = sqlite3.connect(
+                    str(self.path), isolation_level=None)
                 self._conn.row_factory = sqlite3.Row
                 self._conn.execute("PRAGMA foreign_keys = ON")
                 self._conn.create_function(
@@ -148,16 +149,21 @@ class Database:
 
     @contextmanager
     def transaction(self):
-        """Все изменения БД выполняются в транзакциях."""
+        """Все изменения БД выполняются в транзакциях.
+
+        Соединение открыто в режиме autocommit (isolation_level=None),
+        поэтому границы транзакции задаются явно командой BEGIN.
+        """
         conn = self.connection
+        conn.execute("BEGIN")
         try:
             yield conn
-            conn.commit()
+            conn.execute("COMMIT")
         except sqlite3.Error as exc:
-            conn.rollback()
+            conn.execute("ROLLBACK")
             raise DatabaseError(str(exc)) from exc
         except Exception:
-            conn.rollback()
+            conn.execute("ROLLBACK")
             raise
 
     @staticmethod
@@ -358,19 +364,6 @@ class Database:
             category_name=row["category_name"] if "category_name" in keys else "",
             category_type=row["category_type"] if "category_type" in keys else "",
         )
-
-    # ---------- агрегаты для дашборда (совместимость с integer money) ----------
-    def period_totals(self, *, date_from: str, date_to: str,
-                      templates: bool = False) -> dict:
-        """Доходы/расходы/баланс за период в minor. Частный случай TransactionFilter."""
-        f = TransactionFilter(date_from=date_from, date_to=date_to,
-                              templates=templates)
-        s = self.summary(f)
-        return {
-            "income_minor": s["income_minor"],
-            "expense_minor": s["expense_minor"],
-            "balance_minor": s["balance_minor"],
-        }
 
     def daily_totals(self, *, date_from: str, date_to: str) -> list[dict]:
         """Разбивка доходов/расходов по дням периода (шаблоны исключены), minor."""

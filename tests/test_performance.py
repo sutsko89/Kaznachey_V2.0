@@ -37,7 +37,7 @@ def big_db(tmp_path_factory):
     cats = []
     for i in range(CAT_COUNT):
         c = Category(name=f"Категория {i:02d}", type="expense" if i % 5 else "income",
-                     monthly_limit=10000 if i % 5 == 0 else 0)
+                     monthly_limit_minor=1000000 if i % 5 == 0 else 0)
         cats.append(db.add_category(c))
     words = ["такси", "продукты", "аренда", "кофе", "зарплата", "принтер", "отчёт"]
     base = dt.date(2025, 1, 1)
@@ -45,7 +45,7 @@ def big_db(tmp_path_factory):
         cat = cats[i % CAT_COUNT]
         db.add_transaction(Transaction(
             type=cat.type,
-            amount=round(10 + (i % 990) * 1.01, 2),
+            amount_minor=1000 + (i % 990) * 101,
             category_id=cat.id,
             date=(base + dt.timedelta(days=i % 730)).isoformat(),
             description=f"Запись {i} слово {words[i % len(words)]}",

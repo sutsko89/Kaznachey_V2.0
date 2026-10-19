@@ -131,14 +131,6 @@ class TestQueries:
             TransactionFilter(), order_by="; DROP TABLE transactions; --")
         assert total == 6  # безопасное значение по умолчанию
 
-    def test_period_totals_exclude_templates(self, populated: Database):
-        s = populated.summary(TransactionFilter(
-            date_from="2026-10-01", date_to="2026-10-31"))
-        assert s["income_minor"] == 100000
-        assert s["expense_minor"] == 15000  # без шаблона 77700
-        assert s["balance_minor"] == 85000
-        assert s["count"] == 6
-
     def test_summary_equals_rows_for_every_filter(self, populated: Database,
                                                   category: Category,
                                                   income_category: Category):

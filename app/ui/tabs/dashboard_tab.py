@@ -548,7 +548,9 @@ class DashboardTab(QWidget):
         data: list[tuple[str, float, float]] = []
         for ym in months:
             d1, d2 = self.service.month_range(ym)
-            totals = self.service.db.period_totals(date_from=d1, date_to=d2)
+            from app.dal.database import TransactionFilter
+            totals = self.service.db.summary(
+                TransactionFilter(date_from=d1, date_to=d2))
             y, m = int(ym[:4]), int(ym[5:7])
             data.append((f"{MONTH_NAMES[m - 1][:3]} {y}",
                          int(totals["income_minor"]),

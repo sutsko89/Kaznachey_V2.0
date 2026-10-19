@@ -82,11 +82,13 @@ class TestApplyOnEmptyDb:
 
     def test_final_schema_matches_tz(self, db: Database):
         """Итоговая схема соответствует ТЗ (раздел 8)."""
+        # Миграция 003 пересоздаёт таблицы и удаляет deprecated REAL-колонки
+        # (amount, monthly_limit): приложение не должно их читать/писать.
         cols = {c["name"] for c in db.connection.execute("PRAGMA table_info(categories)")}
-        assert cols == {"id", "name", "type", "is_active", "monthly_limit", "created_at",
+        assert cols == {"id", "name", "type", "is_active", "created_at",
                         "monthly_limit_minor"}
         cols = {c["name"] for c in db.connection.execute("PRAGMA table_info(transactions)")}
-        assert cols == {"id", "type", "amount", "category_id", "date", "description",
+        assert cols == {"id", "type", "category_id", "date", "description",
                         "currency", "is_template", "created_at", "updated_at",
                         "amount_minor"}
         cols = {c["name"] for c in db.connection.execute("PRAGMA table_info(app_settings)")}
@@ -199,6 +201,13 @@ def _schema_v2(conn):
     conn.executescript((MIGDIR / "001_init.sql").read_text(encoding="utf-8"))
     conn.executescript((MIGDIR / "002_add_limits.sql").read_text(encoding="utf-8"))
     conn.execute("INSERT INTO app_settings(key,value) VALUES('db_version','2')")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS schema_version ("
+        " version INTEGER NOT NULL PRIMARY KEY, applied_at TEXT NOT NULL)")
+    for v in (1, 2):
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version(version, applied_at)"
+            " VALUES (?, '2026-01-01T00:00:00')", (v,))
     conn.commit()
 
 
@@ -207,10 +216,12 @@ class TestSqlSplitter:
         from app.services.migrations import split_sql_statements
         sql = (MIGDIR / "003_money_minor.sql").read_text(encoding="utf-8")
         stmts = split_sql_statements(sql)
-        assert len(stmts) == 4
-        for s in stmts:
-            assert not s.lstrip().startswith("--")
-            assert ";" not in s or s.startswith("INSERT")
+        # Миграция пересоздаёт таблицы: комментарии не режутся по ";",
+        # каждая инструкция — чистый исполняемый SQL.
+        assert len(stmts) == 13
+        for st in stmts:
+            assert not st.lstrip().startswith("--")
+            assert ";" not in st
 
     def test_semicolon_in_string_literal_preserved(self):
         from app.services.migrations import split_sql_statements
