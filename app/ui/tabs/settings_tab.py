@@ -1,0 +1,204 @@
+"""Вкладка «Настройки»: данные и отображение, резервные копии и откат.
+
+Управление ПИН/паролем отсутствует (однопользовательская редакция).
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import (
+    QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
+    QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton,
+    QVBoxLayout, QWidget,
+)
+
+from app.domain.service import TreasuryService
+from app.errors import BackupError, DatabaseError, RestoreError, ValidationError
+
+
+class SettingsTab(QWidget):
+    def __init__(self, service: TreasuryService, parent=None):
+        super().__init__(parent)
+        self.service = service
+        self.restart_requested = False
+        self.on_saved = None  # колбэк мгновенного применения темы/масштаба
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(10)
+
+        # ---------- Данные и отображение (FR-18/19: только рабочие настройки) ----------
+        data_group = QGroupBox("Данные и отображение")
+        form = QFormLayout(data_group)
+        layout.addWidget(data_group)
+
+        db_path_row = QHBoxLayout()
+        self.db_path_label = QLineEdit(str(service.db.path))
+        self.db_path_label.setReadOnly(True)
+        db_path_row.addWidget(self.db_path_label)
+        form.addRow("Путь к БД:", db_path_row)
+
+        self.scale_combo = QComboBox()
+        self.scale_combo.addItems(["100%", "125%", "150%"])
+        form.addRow("Масштаб интерфейса:", self.scale_combo)
+
+        self.page_size_combo = QComboBox()
+        self.page_size_combo.addItems(["25", "50"])
+        form.addRow("Строк на страницу:", self.page_size_combo)
+
+        self.btn_save_settings = QPushButton("Сохранить настройки")
+        self.btn_save_settings.setObjectName("primaryButton")
+        self.btn_save_settings.setMinimumHeight(36)
+        self.btn_save_settings.clicked.connect(self._save_settings)
+        layout.addWidget(self.btn_save_settings)
+
+        # ---------- Резервные копии и откат ----------
+        backup_group = QGroupBox("Резервные копии и откат")
+        bform = QFormLayout(backup_group)
+        layout.addWidget(backup_group)
+
+        backup_dir_row = QHBoxLayout()
+        self.backup_dir_edit = QLineEdit()
+        self.backup_dir_edit.setPlaceholderText("Папка для бэкапов")
+        self.btn_browse_backup_dir = QPushButton("Выбрать папку…")
+        self.btn_browse_backup_dir.clicked.connect(self._browse_backup_dir)
+        backup_dir_row.addWidget(self.backup_dir_edit)
+        backup_dir_row.addWidget(self.btn_browse_backup_dir)
+        bform.addRow("Папка для бэкапов:", backup_dir_row)
+
+        btns = QHBoxLayout()
+        btns.setSpacing(8)
+        self.btn_create_backup = QPushButton("Создать бэкап")
+        self.btn_create_backup.setObjectName("primaryButton")
+        self.btn_restore = QPushButton("Восстановить из выбранного бэкапа")
+        self.btn_restore.setObjectName("dangerButton")
+        self.btn_refresh_backups = QPushButton("Обновить список")
+        for b in (self.btn_create_backup, self.btn_restore, self.btn_refresh_backups):
+            b.setMinimumHeight(34)
+        btns.addWidget(self.btn_create_backup)
+        btns.addWidget(self.btn_restore)
+        btns.addWidget(self.btn_refresh_backups)
+        bform.addRow(btns)
+
+        self.backups_list = QListWidget()
+        # FR-14/15: восстановление доступно только после явного выбора бэкапа
+        self.backups_list.itemSelectionChanged.connect(self._update_restore_button)
+        bform.addRow(self.backups_list)
+
+        self.btn_create_backup.clicked.connect(self.create_backup)
+        self.btn_restore.clicked.connect(self.restore_selected_backup)
+        self.btn_refresh_backups.clicked.connect(self.refresh_backups_list)
+
+        layout.addStretch(1)
+        self.load_values()
+
+    def _update_restore_button(self) -> None:
+        """FR-15: destructive-кнопка disabled, пока объект явно не выбран."""
+        self.btn_restore.setEnabled(bool(self.backups_list.selectedItems()))
+
+    # ---------- значения ----------
+    def load_values(self) -> None:
+        s = self.service
+        scale = s.get_setting("ui_scale", "100")
+        idx = self.scale_combo.findText(f"{scale}%")
+        if idx >= 0:
+            self.scale_combo.setCurrentIndex(idx)
+        ps = s.get_setting("page_size", "50")
+        idx = self.page_size_combo.findText(ps)
+        if idx >= 0:
+            self.page_size_combo.setCurrentIndex(idx)
+        self.backup_dir_edit.setText(s.get_setting("backup_path", "") or "")
+        self.refresh_backups_list()
+
+    def _save_settings(self) -> None:
+        try:
+            s = self.service
+            # FR-19: пользователь может изменять только ui_scale, page_size, backup_path
+            s.set_setting("ui_scale", self.scale_combo.currentText().rstrip("%"))
+            s.set_setting("page_size", self.page_size_combo.currentText())
+            raw = self.backup_dir_edit.text().strip()
+            s.set_setting("backup_path", str(Path(raw).expanduser()) if raw else "")
+        except (ValidationError, DatabaseError) as exc:
+            QMessageBox.critical(self, "Казначей", str(exc))
+            return
+        if self.on_saved is not None:
+            self.on_saved()
+        QMessageBox.information(self, "Казначей", "Настройки сохранены.")
+
+    # ---------- бэкапы ----------
+    def backup_dir(self) -> Path:
+        return self.service.backup_dir()
+
+    def _browse_backup_dir(self) -> None:
+        chosen = QFileDialog.getExistingDirectory(self, "Папка для бэкапов", str(self.backup_dir()))
+        if chosen:
+            self.backup_dir_edit.setText(chosen)
+            try:
+                self.service.set_setting("backup_path", chosen)
+            except (ValidationError, DatabaseError) as exc:
+                QMessageBox.critical(self, "Казначей", str(exc))
+            self.refresh_backups_list()
+
+    def refresh_backups_list(self) -> None:
+        from app.services.backup import list_backups
+
+        self.backups_list.clear()
+        for p in list_backups(self.backup_dir()):
+            item = QListWidgetItem(p.name)
+            item.setData(Qt.ItemDataRole.UserRole, str(p))
+            self.backups_list.addItem(item)
+        # FR-14: после обновления списка выбор очищен — кнопка disabled
+        self._update_restore_button()
+
+    def create_backup(self) -> bool:
+        """Публичный метод: Ctrl+B вызывает его. Возвращает успех."""
+        from app.services.backup import create_backup as do_backup
+        from app.services.migrations import get_current_version
+
+        try:
+            version = get_current_version(self.service.db)
+            dest = do_backup(self.service.db.path, self.backup_dir(), current_version=version)
+        except BackupError as exc:
+            QMessageBox.critical(self, "Казначей", str(exc))
+            return False
+        except DatabaseError as exc:
+            QMessageBox.critical(self, "Казначей", str(exc))
+            return False
+        self.refresh_backups_list()
+        QMessageBox.information(self, "Казначей", f"Резервная копия создана: {dest}")
+        return True
+
+    def restore_selected_backup(self) -> bool:
+        """Откат только вручную и только с подтверждением. Возвращает успех."""
+        items = self.backups_list.selectedItems()  # только явный выбор пользователя
+        if not items:
+            QMessageBox.information(self, "Казначей", "Выберите бэкап из списка.")
+            return False
+        item = items[0]
+        backup_path = Path(item.data(Qt.ItemDataRole.UserRole))
+        answer = QMessageBox.question(
+            self, "Подтверждение восстановления",
+            "Вы уверены, что хотите заменить текущую БД выбранной резервной копией? "
+            "Все изменения после даты бэкапа будут потеряны.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return False
+        from app.services.backup import restore_backup
+
+        try:
+            self.service.db.close()
+            restore_backup(backup_path, self.service.db.path)
+        except RestoreError as exc:
+            QMessageBox.critical(self, "Казначей", str(exc))
+            return False
+        QMessageBox.information(
+            self, "Казначей",
+            "Восстановление выполнено. Приложение будет закрыто — запустите его снова.",
+        )
+        top = self.window()
+        if hasattr(top, "quit_after_restore"):
+            top.quit_after_restore()
+        return True
