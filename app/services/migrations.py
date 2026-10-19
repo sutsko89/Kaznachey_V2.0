@@ -1,203 +1,170 @@
-"""Собственные SQL-миграции схемы БД «Казначей».
+"""Механизм миграций схемы БД.
 
-Правила (см. ТЗ, раздел 6):
-- имена файлов: NNN_описание.sql;
-- перед каждой миграцией создаётся бэкап;
-- каждый файл выполняется в одной транзакции;
-- при ошибке — откат транзакции;
-- версия пишется в schema_version и дублируется в app_settings.db_version.
+Миграции — SQL-файлы migrations/NNN_*.sql с непрерывной нумерацией, начиная с 001.
+Версия хранится в таблице app_settings (ключ db_version) и изменяется только
+этим механизмом. Перед каждой ожидающей миграцией автоматически создаётся
+резервная копия; если файла БД ещё нет (первый запуск) — копировать нечего,
+миграции применяются к новой базе после её создания.
+
+FR-16: перед изменением БД проверяется содержимое устаревшей колонки currency:
+записи с валютой, отличной от RUB, блокируют автоматическое продолжение
+(MigrationError) — молча пересчитывать USD/EUR в рубли запрещено (FR-13).
+
+Встроенные ресурсы: в frozen-сборке PyInstaller миграции читаются из
+sys._MEIPASS (каталог, распакованный из datas), а не из папки рядом с exe;
+в режиме разработки — из каталога репозитория. Подмена штатных SQL-файлов
+файлами рядом с исполняемым файлом невозможна: поиск вне бандла не выполняется.
 """
 from __future__ import annotations
 
 import datetime as dt
 import re
 import sqlite3
-from dataclasses import dataclass
 from pathlib import Path
 
-from app.dal.database import Database
-from app.errors import BackupError, MigrationError  # noqa: F401 (BackupError пробрасывается вызывающему коду)
-from app.services.backup import create_backup
+from app.errors import BackupError, DatabaseError, MigrationError
 
-MIGRATION_NAME_RE = re.compile(r"^(\d{3})_([a-z0-9_]+)\.sql$")
+MIGRATION_RE = re.compile(r"^(\d{3})_[A-Za-z0-9_]+\.sql$")
 
 
-@dataclass(frozen=True)
-class MigrationFile:
-    version: int
-    description: str
-    path: Path
+def bundled_migrations_dir() -> Path:
+    """Каталог миграций: ресурс пакета в dev или распакованный бандл в frozen."""
+    import sys
+
+    if getattr(sys, "frozen", False):
+        base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
+        cand = base / "migrations"
+        if not cand.is_dir():
+            raise MigrationError(
+                "Внутренний ресурс «migrations» отсутствует в сборке. "
+                "Пересоберите приложение: запуск с неполной сборкой прерван, "
+                "частично инициализированная база данных не создана."
+            )
+        return cand
+    return Path(__file__).resolve().parent.parent.parent / "migrations"
 
 
-def find_migrations(migrations_dir: str | Path) -> list[MigrationFile]:
-    """Находит и сортирует файлы миграций; проверяет строго последовательную нумерацию."""
+def load_migrations(migrations_dir: str | Path) -> list[tuple[int, Path]]:
     d = Path(migrations_dir)
     if not d.is_dir():
-        raise MigrationError(f"Папка миграций не найдена: {d}")
-    result: list[MigrationFile] = []
-    for entry in sorted(d.iterdir()):
-        m = MIGRATION_NAME_RE.match(entry.name)
+        raise MigrationError(f"Каталог миграций не найден: {d}")
+    result: list[tuple[int, Path]] = []
+    for p in sorted(d.glob("*.sql")):
+        m = MIGRATION_RE.match(p.name)
         if m:
-            result.append(MigrationFile(int(m.group(1)), m.group(2), entry))
-    result.sort(key=lambda x: x.version)
-    versions = [mf.version for mf in result]
-    if versions and (versions[0] != 1 or any(b - a != 1 for a, b in zip(versions, versions[1:]))):
-        raise MigrationError(f"Нумерация миграций не строго последовательная: {versions}")
+            result.append((int(m.group(1)), p))
+    versions = [v for v, _ in result]
+    expected = list(range(1, len(versions) + 1))
+    if versions != expected:
+        raise MigrationError(
+            f"Нарушена непрерывная нумерация миграций: найдено {versions}, "
+            f"ожидалось {expected}"
+        )
     return result
 
 
-def ensure_schema_version_table(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS schema_version ("
-        " version INTEGER NOT NULL PRIMARY KEY,"
-        " applied_at TEXT NOT NULL)"
-    )
-
-
-def get_current_version(db: Database) -> int:
-    """Текущая версия схемы; если таблицы нет — 0."""
-    conn = db.connection
-    row = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'"
-    ).fetchone()
-    if row is None:
+def get_current_version(db_path: str | Path) -> int:
+    """Текущая версия схемы БД (0, если таблицы настроек ещё нет)."""
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute(
+            "SELECT value FROM app_settings WHERE key='db_version'"
+        ).fetchone()
+        return int(row[0]) if row else 0
+    except sqlite3.Error:
         return 0
-    r = conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()
-    return int(r["v"]) if r and r["v"] is not None else 0
+    finally:
+        conn.close()
 
 
-def _app_settings_exists(conn: sqlite3.Connection) -> bool:
-    return conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='app_settings'"
-    ).fetchone() is not None
+def run_migrations(db, migrations_dir: str | Path, backup_dir: str | Path) -> list[int]:
+    """Применяет все ожидающие миграции. Возвращает список применённых версий.
 
-
-def run_migrations(
-    db: Database,
-    migrations_dir: str | Path,
-    backup_dir: str | Path,
-) -> list[int]:
-    """Применяет все миграции с версией выше текущей. Возвращает список применённых версий.
-
-    Перед каждой миграцией создаётся бэкап kaznachei_backup_YYYYMMDD_HHMMSS_v<current>.db.
-    Если бэкап создать не удалось — миграция НЕ выполняется, поднимается BackupError.
+    Каждая ожидающая миграция выполняется в одной транзакции SQLite
+    (SQLite поддерживает атомарные ALTER TABLE + UPDATE внутри BEGIN...COMMIT);
+    при ошибке — полный rollback без частичных изменений схемы.
     """
+    from app.services.backup import create_backup
+
+    migrations = load_migrations(migrations_dir)
+    conn = db.connection
+    current = _read_version(conn)
     applied: list[int] = []
-    migrations = find_migrations(migrations_dir)
-    conn0 = db.connection
-    has_app_settings_before = _app_settings_exists(conn0)
-    ensure_schema_version_table(db.connection)
-    if not has_app_settings_before and _app_settings_exists(conn0):
-        # schema_version создаётся автоматически — фиксируем это в app_settings (ТЗ 6.1)
-        conn0.execute(
-            "INSERT INTO app_settings (key, value) VALUES ('db_version', ?)"
-            " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (str(get_current_version(db)),),
-        )
-        conn0.commit()
-    current = get_current_version(db)
-    pending = [mf for mf in migrations if mf.version > current]
-
-    # Читаем SQL всех ожидающих миграций ДО создания первого бэкапа: ошибка
-    # чтения файла не должна приводить к лишнему бэкапу «пустой» БД (ТЗ 9.10:
-    # бэкап нужен именно перед применением SQL, а не перед чтением файла).
-    migration_sql: dict[int, str] = {}
-    for mf in pending:
-        try:
-            migration_sql[mf.version] = mf.path.read_text(encoding="utf-8")
-        except OSError as exc:
-            raise MigrationError(f"Не удалось прочитать {mf.path.name}: {exc}") from exc
-
-    for mf in pending:
-        conn = db.connection
-        # 0. убеждаемся, что между миграциями нет незакрытой транзакции
-        if conn.in_transaction:
-            conn.commit()
-        # 1. бэкап перед миграцией (при неудаче — BackupError, миграция не выполняется)
-        create_backup(db.path, backup_dir, current_version=current)
-        # 2. SQL в одной транзакции + запись версии
-        sql = migration_sql[mf.version]
-        # Явно управляем транзакцией: isolation_level=None отключает авто-
-        # COMMIT/автотранзакции модуля sqlite3, BEGIN/COMMIT/ROLLBACK — наши.
-        old_isolation = conn.isolation_level
-        conn.isolation_level = None
+    for version, path in migrations:
+        if version <= current:
+            continue
+        sql = path.read_text(encoding="utf-8")
+        # 1. Резервная копия до изменения (если файл БД уже существует).
+        if Path(db.path).is_file() and Path(db.path).stat().st_size > 0:
+            try:
+                create_backup(db.path, backup_dir, current_version=current)
+            except BackupError:
+                raise
+            except Exception as exc:
+                raise BackupError(str(exc)) from exc
+        # 2. FR-13: проверка foreign-currency до изменения схемы.
+        _assert_rub_only(conn, version, path.name)
+        # 3. Атомарное применение.
         try:
             conn.execute("BEGIN")
-            cur = conn.cursor()
-            # executescript делает скрытый COMMIT, поэтому режем скрипт и исполняем вручную
-            _exec_sql_in_transaction(cur, sql)
-            now = dt.datetime.now().isoformat(timespec="seconds")
-            cur.execute(
-                "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
-                (mf.version, now),
-            )
-            # 3. дублируем версию в app_settings (ТЗ 6.1). Если миграция создала
-            # таблицу app_settings — пишем версию сразу в той же транзакции; если
-            # таблицы нет (произвольные тестовые наборы) — версия остаётся только
-            # в schema_version.
-            if _app_settings_exists(conn):
-                cur.execute(
+            try:
+                _exec_migration_sql(conn, sql)
+                conn.execute(
                     "INSERT INTO app_settings (key, value) VALUES ('db_version', ?)"
                     " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    (str(mf.version),),
+                    (str(version),),
                 )
-            conn.execute("COMMIT")
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
         except sqlite3.Error as exc:
-            if conn.in_transaction:
-                conn.execute("ROLLBACK")
             raise MigrationError(
-                f"Миграция {mf.path.name} не выполнена, изменения откачены: {exc}"
+                f"Миграция {path.name} не выполнена; изменения откачены: {exc}"
             ) from exc
-        finally:
-            conn.isolation_level = old_isolation
-        # Post-hoc: если app_settings появилась вне основной транзакции или была
-        # пуста до миграции, обновим db_version напрямую.
-        if _app_settings_exists(conn):
-            conn.execute(
-                "INSERT INTO app_settings (key, value) VALUES ('db_version', ?)"
-                " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (str(mf.version),),
-            )
-            conn.commit()
-        applied.append(mf.version)
-        current = mf.version
+        applied.append(version)
     return applied
 
 
-def _exec_sql_in_transaction(cursor: sqlite3.Cursor, sql: str) -> None:
-    """Выполняет несколько SQL-операторов внутри уже открытой транзакции.
+def _exec_migration_sql(conn: sqlite3.Connection, sql: str) -> None:
+    """Выполняет скрипт миграции внутри уже открытой транзакции.
 
-    Не использует executescript (он делает скрытый COMMIT), а режет по ';' вне
-    строк/комментариев — достаточно для простых DDL/DML-скриптов миграций.
+    executescript самовольно делает COMMIT, поэтому инструкции разделяются
+    вручную (миграции содержат только простые statements без триггеров).
     """
-    stmt: list[str] = []
-    in_str: str | None = None
-    i = 0
-    while i < len(sql):
-        ch = sql[i]
-        if in_str:
-            stmt.append(ch)
-            if ch == in_str:
-                # двойная кавычка внутри строки — экранирование
-                if i + 1 < len(sql) and sql[i + 1] == in_str:
-                    stmt.append(sql[i + 1])
-                    i += 1
-                in_str = None
-        elif ch in ("'", '"'):
-            in_str = ch
-            stmt.append(ch)
-        elif ch == "-" and sql[i:i + 2] == "--":
-            nl = sql.find("\n", i)
-            i = nl if nl != -1 else len(sql)
-            continue
-        elif ch == ";":
-            text = "".join(stmt).strip()
-            if text:
-                cursor.execute(text)
-            stmt = []
-        else:
-            stmt.append(ch)
-        i += 1
-    text = "".join(stmt).strip()
-    if text:
-        cursor.execute(text)
+    statements = [s.strip() for s in sql.split(";") if s.strip()]
+    for stmt in statements:
+        conn.execute(stmt)
+
+
+def _read_version(conn: sqlite3.Connection) -> int:
+    try:
+        row = conn.execute(
+            "SELECT value FROM app_settings WHERE key='db_version'").fetchone()
+        return int(row[0]) if row else 0
+    except sqlite3.Error:
+        return 0
+
+
+def _assert_rub_only(conn: sqlite3.Connection, target_version: int,
+                     filename: str) -> None:
+    """Если в таблице operations есть currency != 'RUB' — блокируем миграцию."""
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "transactions" not in tables:
+        return
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(transactions)")}
+    if "currency" not in cols:
+        return
+    try:
+        n = conn.execute(
+            "SELECT COUNT(*) FROM transactions"
+            " WHERE currency IS NOT NULL AND currency <> 'RUB'").fetchone()[0]
+    except sqlite3.Error:
+        return
+    if n:
+        raise MigrationError(
+            f"Найдено записей с валютой, отличной от RUB: {n}. "
+            "Автоматическая миграция заблокирована: мультивалютность не поддерживается, "
+            "молча пересчитывать USD/EUR в рубли запрещено. "
+            "Создайте резервную копию или CSV-экспорт и обратитесь к разработчику."
+        )

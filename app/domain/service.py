@@ -1,21 +1,39 @@
-"""Предметный сервис «Казначей»: операции, категории, шаблоны, лимиты, сводки."""
+"""Предметный сервис «Казначей»: операции, категории, шаблоны, лимиты, сводки.
+
+Этап 1 «восстановление доверия к данным»:
+- деньги во всём доменном слое и DAL передаются как int минимальных единиц
+  (minor; для RUB 1 minor = 1 копейка); float для денег запрещён;
+- единая модель TransactionFilter: список операций, подсчёт строк, сводка и
+  CSV-экспорт используют один и тот же экземпляр фильтра;
+- настройки разделены: пользовательские (ui_scale, page_size, backup_path),
+  внутренние (db_version — только механизм миграций) и устаревшие ложные
+  (base_currency/date_format/number_format/theme — не читаются и не пишутся).
+"""
 from __future__ import annotations
 
 import datetime as dt
+from decimal import Decimal
 from pathlib import Path
 
-from app.dal.database import Category, Database, Transaction
+from app.dal.database import (Category, Database, Transaction,
+                              TransactionFilter)
 from app.domain.validators import (
+    MAX_MINOR,
+    parse_amount_minor,
     validate_category_fields,
     validate_date,
     validate_transaction_fields,
 )
 from app.errors import CategoryInUseError, ValidationError
 
-ALLOWED_SETTINGS_KEYS = {
-    "base_currency", "db_version", "date_format", "number_format",
-    "ui_scale", "theme", "page_size", "backup_path",
-}
+# Пользователь может изменять только эти ключи (FR-19).
+USER_SETTINGS_KEYS = {"ui_scale", "page_size", "backup_path"}
+# Внутренние ключи: изменяются только механизмом миграций.
+INTERNAL_SETTINGS_KEYS = {"db_version"}
+# Устаревшие ложные настройки: остаются в таблице старых БД для совместимости,
+# но код приложения их не читает и не пишет.
+LEGACY_IGNORED_KEYS = {"base_currency", "date_format", "number_format", "theme"}
+ALLOWED_SETTINGS_KEYS = USER_SETTINGS_KEYS | INTERNAL_SETTINGS_KEYS | LEGACY_IGNORED_KEYS
 FORBIDDEN_SETTINGS_KEYS = {"pin_hash", "password_hash", "login_attempts", "lock_until"}
 
 INCOME_LABEL = "Доход"
@@ -24,6 +42,15 @@ EXPENSE_LABEL = "Расход"
 
 def type_label(t: str) -> str:
     return INCOME_LABEL if t == "income" else EXPENSE_LABEL
+
+
+def amount_to_minor(value) -> int:
+    """Публичная нормализация суммы в minor (используется UI-виджетом ввода).
+
+    Правила ввода (FR-10): не более двух знаков после разделителя,
+    пробелы как разделители тысяч, ',' или '.'; молчаливое округление запрещено.
+    """
+    return parse_amount_minor(value)
 
 
 class TreasuryService:
@@ -56,11 +83,14 @@ class TreasuryService:
     def get_setting(self, key: str, default: str | None = None) -> str | None:
         if key in FORBIDDEN_SETTINGS_KEYS:
             raise ValidationError({"key": "Хранение ключей авторизации запрещено"})
+        if key in LEGACY_IGNORED_KEYS:
+            raise ValidationError({"key": f"Настройка «{key}» удалена из продукта"})
         return self.db.get_setting(key, default)
 
     def set_setting(self, key: str, value: str) -> None:
-        if key in FORBIDDEN_SETTINGS_KEYS or key not in ALLOWED_SETTINGS_KEYS:
-            raise ValidationError({"key": f"Разрешены только ключи настроек: {sorted(ALLOWED_SETTINGS_KEYS)}"})
+        if key in FORBIDDEN_SETTINGS_KEYS or key not in USER_SETTINGS_KEYS:
+            raise ValidationError(
+                {"key": f"Разрешены только пользовательские ключи: {sorted(USER_SETTINGS_KEYS)}"})
         self.db.set_setting(key, value)
 
     def backup_dir(self, db_dir_fallback: bool = True) -> Path:
@@ -71,8 +101,12 @@ class TreasuryService:
 
     # ---------- категории ----------
     def add_category(self, name: str, type_: str, monthly_limit=0) -> Category:
-        name, type_, limit = validate_category_fields(name, type_, monthly_limit)
-        cat = Category(name=name, type=type_, is_active=True, monthly_limit=limit)
+        """monthly_limit: сумма в рублях (str/Decimal/int) либо minor c суффиксом
+        через явный вызов *_minor-методов; нормализуется в int minor."""
+        name_clean, type_, limit_minor = validate_category_fields(
+            name, type_, _limit_to_minor(monthly_limit))
+        cat = Category(name=name_clean, type=type_, is_active=True,
+                       monthly_limit_minor=limit_minor)
         try:
             return self.db.add_category(cat)
         except Exception as exc:
@@ -89,14 +123,15 @@ class TreasuryService:
         existing = self.db.get_category(category_id)
         if existing is None:
             raise ValidationError({"id": "Категория не найдена"})
-        name, type_, limit = validate_category_fields(name, type_, monthly_limit)
+        name_clean, type_, limit_minor = validate_category_fields(
+            name, type_, _limit_to_minor(monthly_limit))
         if type_ != existing.type and self.db.count_transactions_for_category(category_id) > 0:
             raise ValidationError(
                 {"type": "Нельзя изменить тип категории, если по ней есть операции"}
             )
-        existing.name = name
+        existing.name = name_clean
         existing.type = type_
-        existing.monthly_limit = limit
+        existing.monthly_limit_minor = limit_minor
         if is_active is not None:
             existing.is_active = bool(is_active)
         self.db.update_category(existing)
@@ -118,12 +153,12 @@ class TreasuryService:
     def list_categories(self, include_inactive: bool = True) -> list[Category]:
         return self.db.list_categories(include_inactive=include_inactive)
 
-    # ---------- лимиты ----------
+    # ---------- лимиты (сравнение по целым minor) ----------
     def budget_status(self, month: str | None = None) -> list[dict]:
         """Статус месячных лимитов расходных категорий.
 
-        Элемент: {category, spent, limit, percent, over}.
-        percent=None, если лимит 0 (без лимита).
+        spent/limit — int minor; percent — Decimal|None (не деньги);
+        over — сравнение целых: spent > limit.
         """
         month = month or self.current_month()
         spent_map = self.db.spent_by_category(month)
@@ -131,18 +166,17 @@ class TreasuryService:
         for cat in self.db.list_categories(include_inactive=True):
             if cat.type != "expense":
                 continue
-            spent = round(spent_map.get(cat.id, 0.0), 2)
-            limit = cat.monthly_limit or 0.0
-            percent = round(spent / limit * 100.0, 1) if limit > 0 else None
-            result.append(
-                {
-                    "category": cat,
-                    "spent": spent,
-                    "limit": limit,
-                    "percent": percent,
-                    "over": bool(limit > 0 and spent > limit),
-                }
-            )
+            spent = int(spent_map.get(cat.id, 0))
+            limit = int(cat.monthly_limit_minor or 0)
+            percent = (Decimal(spent) * 100 / Decimal(limit)).quantize(Decimal("0.1")) \
+                if limit > 0 else None
+            result.append({
+                "category": cat,
+                "spent": spent,
+                "limit": limit,
+                "percent": percent,
+                "over": bool(limit > 0 and spent > limit),
+            })
         # превышения — сверху списка
         result.sort(key=lambda x: (not x["over"], x["category"].name.lower()))
         return result
@@ -164,41 +198,47 @@ class TreasuryService:
     def create_transaction(
         self, *, type_: str, amount, category_id, date: str,
         description: str = "", currency: str = "RUB", as_template: bool = False,
+        amount_minor: int | None = None,
     ) -> Transaction:
         data = validate_transaction_fields(
-            type_=type_, amount=amount, category_id=category_id, date=date, currency=currency
+            type_=type_, amount=_amount_for_validate(amount, amount_minor),
+            category_id=category_id, date=date, currency=currency
         )
         self._resolve_type(data["category_id"], data["type"])
         tr = Transaction(
             type=data["type"],
-            amount=data["amount"],
+            amount_minor=data["amount"],          # int minor
             category_id=data["category_id"],
             date=data["date"],
             description=(description or "").strip(),
-            currency=data["currency"],
+            currency="RUB",                        # техническое значение (FR-13)
             is_template=bool(as_template),
         )
         return self.db.add_transaction(tr)
 
-    def edit_transaction(self, transaction_id: int, **fields) -> Transaction:
+    def edit_transaction(self, transaction_id: int, *,
+                         amount_minor: int | None = None, **fields) -> Transaction:
         tr = self.db.get_transaction(transaction_id)
         if tr is None:
             raise ValidationError({"id": "Операция не найдена"})
-        allowed = ("type", "amount", "category_id", "date", "description", "currency")
-        merged = {k: getattr(tr, k) for k in allowed}
-        merged["description"] = tr.description
+        allowed = ("type", "amount", "category_id", "date", "description")
+        merged = {"type": tr.type, "amount": tr.amount_minor,
+                  "category_id": tr.category_id, "date": tr.date,
+                  "description": tr.description}
         for key, value in fields.items():
             if key in allowed:
                 merged[key] = value
-        data = validate_transaction_fields(type_=merged["type"], amount=merged["amount"],
-                                           category_id=merged["category_id"],
-                                           date=merged["date"], currency=merged["currency"])
+        data = validate_transaction_fields(
+            type_=merged["type"],
+            amount=_amount_for_validate(merged["amount"], amount_minor),
+            category_id=merged["category_id"],
+            date=merged["date"], currency="RUB")
         self._resolve_type(data["category_id"], data["type"])
         tr.type = data["type"]
-        tr.amount = data["amount"]
+        tr.amount_minor = data["amount"]
         tr.category_id = data["category_id"]
         tr.date = data["date"]
-        tr.currency = data["currency"]
+        tr.currency = "RUB"
         tr.description = (merged["description"] or "").strip()
         self.db.update_transaction(tr)
         return tr
@@ -207,50 +247,68 @@ class TreasuryService:
         self.db.delete_transaction(transaction_id)
 
     def confirm_text_for_delete(self, tr: Transaction) -> str:
-        amount_str = format_amount_ru(tr.amount)
+        amount_str = format_amount_ru(tr.amount_minor)
         date_str = to_display_date(tr.date)
         return f"Удалить операцию на сумму {amount_str} от {date_str}?"
 
-    def list_transactions(self, **kwargs) -> tuple[list[Transaction], int]:
-        kwargs.setdefault("templates", False)
-        return self.db.list_transactions(**kwargs)
+    def list_transactions(self, filter: TransactionFilter, *,
+                          order_by: str = "date DESC, id DESC",
+                          limit: int | None = None,
+                          offset: int = 0) -> tuple[list[Transaction], int]:
+        return self.db.list_transactions(filter, order_by=order_by,
+                                         limit=limit, offset=offset)
+
+    def summary(self, filter: TransactionFilter) -> dict:
+        """Сводка по той же выборке, что и таблица (FR-03)."""
+        return self.db.summary(filter)
 
     # ---------- шаблоны ----------
     def list_templates(self) -> list[Transaction]:
-        rows, _total = self.db.list_transactions(templates=True, order_by="c.name COLLATE NOCASE ASC, t.date DESC")
+        rows, _total = self.db.list_transactions(
+            TransactionFilter(templates=True),
+            order_by="c.name COLLATE NOCASE ASC, t.date DESC")
         return rows
 
-    def create_template_from_data(self, *, type_: str, amount, category_id, description: str = "", currency: str = "RUB") -> Transaction:
+    def create_template_from_data(self, *, type_: str, amount, category_id,
+                                  description: str = "",
+                                  currency: str = "RUB",
+                                  amount_minor: int | None = None) -> Transaction:
         """Шаблон хранится в transactions с is_template=1; дата шаблона — дата создания."""
         data = validate_transaction_fields(
-            type_=type_, amount=amount, category_id=category_id,
+            type_=type_, amount=_amount_for_validate(amount, amount_minor),
+            category_id=category_id,
             date=self.today(), currency=currency,
         )
         self._resolve_type(data["category_id"], data["type"])
         tr = Transaction(
-            type=data["type"], amount=data["amount"], category_id=data["category_id"],
+            type=data["type"], amount_minor=data["amount"],
+            category_id=data["category_id"],
             date=data["date"], description=(description or "").strip(),
-            currency=data["currency"], is_template=True,
+            currency="RUB", is_template=True,
         )
         return self.db.add_transaction(tr)
 
-    def edit_template(self, template_id: int, **fields) -> Transaction:
+    def edit_template(self, template_id: int, *, amount_minor: int | None = None,
+                      **fields) -> Transaction:
         tr = self.db.get_transaction(template_id)
         if tr is None or not tr.is_template:
             raise ValidationError({"id": "Шаблон не найден"})
-        allowed = ("type", "amount", "category_id", "description", "currency")
-        merged = {k: getattr(tr, k) for k in allowed}
+        allowed = ("type", "amount", "category_id", "description")
+        merged = {"type": tr.type, "amount": tr.amount_minor,
+                  "category_id": tr.category_id, "description": tr.description}
         for key, value in fields.items():
             if key in allowed:
                 merged[key] = value
-        data = validate_transaction_fields(type_=merged["type"], amount=merged["amount"],
-                                           category_id=merged["category_id"],
-                                           date=tr.date, currency=merged["currency"])
+        data = validate_transaction_fields(
+            type_=merged["type"],
+            amount=_amount_for_validate(merged["amount"], amount_minor),
+            category_id=merged["category_id"],
+            date=tr.date, currency="RUB")
         self._resolve_type(data["category_id"], data["type"])
         tr.type = data["type"]
-        tr.amount = data["amount"]
+        tr.amount_minor = data["amount"]
         tr.category_id = data["category_id"]
-        tr.currency = data["currency"]
+        tr.currency = "RUB"
         tr.description = (merged["description"] or "").strip()
         self.db.update_transaction(tr)
         return tr
@@ -266,18 +324,19 @@ class TreasuryService:
         return f"Удалить шаблон «{name}»? Операции, созданные по нему ранее, останутся."
 
     def use_template(self, template_id: int, *, date: str | None = None,
-                     amount=None, description: str | None = None) -> Transaction:
+                     amount=None, amount_minor: int | None = None,
+                     description: str | None = None) -> Transaction:
         """Создаёт обычную операцию по шаблону; дата подставляется сегодняшняя."""
         tpl = self.db.get_transaction(template_id)
         if tpl is None or not tpl.is_template:
             raise ValidationError({"id": "Шаблон не найден"})
         return self.create_transaction(
             type_=tpl.type,
-            amount=tpl.amount if amount is None else amount,
+            amount=tpl.amount_minor if amount is None else amount,
+            amount_minor=amount_minor,
             category_id=tpl.category_id,
             date=date or self.today(),
             description=tpl.description if description is None else description,
-            currency=tpl.currency,
             as_template=False,
         )
 
@@ -286,52 +345,92 @@ class TreasuryService:
         validate_date(date_from)
         validate_date(date_to)
         if date_from > date_to:
-            raise ValidationError({"date_from": "Начало периода позже его конца"})
-        return self.db.period_totals(date_from=date_from, date_to=date_to)
+            raise ValidationError({"date_from": EMPTY_PERIOD_MESSAGE})
+        return self.db.summary(TransactionFilter(date_from=date_from, date_to=date_to))
 
     def daily_breakdown(self, date_from: str, date_to: str) -> list[dict]:
-        """Разбивка доходов/расходов по дням периода (для дашборда)."""
+        """Разбивка доходов/расходов по дням периода (для дашборда), minor."""
         validate_date(date_from)
         validate_date(date_to)
         if date_from > date_to:
-            raise ValidationError({"date_from": "Начало периода позже его конца"})
+            raise ValidationError({"date_from": EMPTY_PERIOD_MESSAGE})
         return self.db.daily_totals(date_from=date_from, date_to=date_to)
 
     def category_report(self, date_from: str, date_to: str) -> list[dict]:
-        """Отчёт по категориям: сумма, доля %, остаток лимита (для расходов за месяц)."""
+        """Отчёт по категориям: сумма (minor), доля %, остаток лимита (minor)."""
         rows = self.db.category_report(date_from, date_to)
-        total_all = sum(r["total"] for r in rows) or 0.0
-        spent_map = self.db.spent_by_category(date_from[:7]) if date_from[:7] == date_to[:7] else {}
+        total_all = sum(r["total_minor"] for r in rows)
+        spent_map = (self.db.spent_by_category(date_from[:7])
+                     if date_from[:7] == date_to[:7] else {})
         out: list[dict] = []
         for r in rows:
-            share = round(r["total"] / total_all * 100.0, 1) if total_all else 0.0
+            share = (Decimal(r["total_minor"]) * 100 / Decimal(total_all)).quantize(Decimal("0.1")) \
+                if total_all else Decimal("0.0")
             remaining = None
-            if r["type"] == "expense" and r["monthly_limit"] > 0:
-                spent = spent_map.get(r["category_id"], r["total"])
-                remaining = round(r["monthly_limit"] - spent, 2)
-            out.append({**r, "share_percent": share, "remaining_limit": remaining})
+            if r["type"] == "expense" and r["monthly_limit_minor"] > 0:
+                spent = spent_map.get(r["category_id"], r["total_minor"])
+                remaining = r["monthly_limit_minor"] - spent   # целые minor
+            out.append({**r, "share_percent": share, "remaining_limit_minor": remaining})
         return out
 
 
-# ---------- форматирование (локализация) ----------
-def format_amount_ru(value: float) -> str:
-    """12345.67 -> '12 345,67' (неразрывный пробел как разделитель тысяч)."""
-    sign = "-" if value < 0 else ""
-    whole, frac = divmod(abs(float(value)), 1)
-    frac_cents = round(frac * 100)
-    if frac_cents == 100:
-        whole, frac_cents = whole + 1, 0
-    whole_str = f"{int(whole):,}".replace(",", "\u2009")
-    return f"{sign}{whole_str},{frac_cents:02d}"
+EMPTY_PERIOD_MESSAGE = "Дата начала не может быть позже даты окончания."
+
+
+def _amount_for_validate(amount, amount_minor: int | None):
+    """Выбор денежного значения для валидации.
+
+    UI всегда передаёт явный `amount_minor` (уже разобранный виджетом).
+    Если передано только legacy-поле `amount`: Decimal/int трактуются как
+    рубли (совместимость доменных тестов), str — разбирается по правилам
+    FR-10 через parse_amount_minor. float среди денег запрещён.
+    """
+    if amount_minor is not None:
+        return int(amount_minor)
+    if isinstance(amount, float):
+        raise ValidationError(
+            {"amount": "float для денежных значений запрещён; используйте minor (int)"})
+    return amount
+
+
+# ---------- форматирование (локализация; без промежуточного float) ----------
+def format_amount_ru(minor: int) -> str:
+    """Целое число копеек -> '1 234,56' (неразрывный тонкий пробел в тысячах).
+
+    0 -> '0,00'; 1 -> '0,01'; 123456 -> '1 234,56'; -123456 -> '-1 234,56'.
+    """
+    minor = int(minor)
+    sign = "-" if minor < 0 else ""
+    whole, cents = divmod(abs(minor), 100)
+    whole_str = f"{whole:,}".replace(",", "\u2009")
+    return f"{sign}{whole_str},{cents:02d}"
 
 
 def to_display_date(iso_date: str) -> str:
-    """YYYY-MM-DD -> DD.MM.YYYY (формат дат в UI)."""
+    """YYYY-MM-DD -> DD.MM.YYYY (единственный формат дат в UI)."""
     y, m, d = iso_date.split("-")
     return f"{d}.{m}.{y}"
 
 
 def from_display_date(display: str) -> str:
-    """DD.MM.YYYY -> YYYY-MM-DD."""
+    """DD.MM.YYYY -> YYYY-MM-DD; при ошибке — ValueError (без молчаливого '')."""
     d, m, y = display.split(".")
-    return f"{y}-{m}-{d}"
+    iso = f"{y}-{m}-{d}"
+    validate_date(iso)
+    return iso
+
+
+def _limit_to_minor(value) -> int:
+    """Лимит категории: int трактуется как рубли (совместимость тестов 002-era),
+    строка/Decimal разбираются по правилам FR-10; отрицательное — ошибка."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        minor = value * 100
+        if minor > MAX_MINOR:
+            raise ValidationError({"monthly_limit": "Слишком большое значение лимита"})
+        if minor < 0:
+            raise ValidationError({"monthly_limit": "Лимит не может быть отрицательным"})
+        return minor
+    minor = parse_amount_minor(value)
+    if minor < 0:
+        raise ValidationError({"monthly_limit": "Лимит не может быть отрицательным"})
+    return minor

@@ -1,10 +1,19 @@
-"""Слой доступа к данным (DAL): SQLite, транзакции, выборки."""
+"""Слой доступа к данным (DAL): SQLite, транзакции, выборки.
+
+Этап 1 «восстановление доверия к данным»:
+- денежные значения хранятся как целые минимальные единицы (minor, копейки);
+  старые REAL-колонки amount / monthly_limit — deprecated, не читаются и не пишутся;
+- единый построитель WHERE для TransactionFilter: список операций, подсчёт строк,
+  агрегаты (доход/расход/баланс) и CSV-экспорт используют один и тот же фильтр;
+- блокировка второго экземпляра перенесена из SQLite-транзакции в QLockFile
+  (см. app/main.py); здесь BEGIN IMMEDIATE больше не используется.
+"""
 from __future__ import annotations
 
 import datetime as dt
 import sqlite3
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from app.errors import DatabaseError
@@ -19,13 +28,28 @@ def default_db_path() -> Path:
     return base / DB_FILENAME
 
 
+@dataclass(frozen=True)
+class TransactionFilter:
+    """Единая модель фильтра операций (FR-01).
+
+    Один экземпляр передаётся в список, подсчёт, сводку и экспорт.
+    date_from/date_to включаются в диапазон; None — граница не задана.
+    """
+    search: str = ""
+    date_from: str | None = None
+    date_to: str | None = None
+    tx_type: str | None = None          # "income" | "expense" | None
+    category_id: int | None = None
+    templates: bool = False             # True — только шаблоны, False — без них
+
+
 @dataclass
 class Category:
     id: int | None = None
     name: str = ""
-    type: str = "expense"  # income / expense
+    type: str = "expense"               # income / expense
     is_active: bool = True
-    monthly_limit: float = 0.0
+    monthly_limit_minor: int = 0        # копейки; 0 = без лимита
     created_at: str = ""
 
 
@@ -33,17 +57,59 @@ class Category:
 class Transaction:
     id: int | None = None
     type: str = "expense"
-    amount: float = 0.0
+    amount_minor: int = 0               # копейки, строго > 0 для операций
     category_id: int = 0
-    date: str = ""
+    date: str = ""                      # YYYY-MM-DD
     description: str = ""
-    currency: str = "RUB"
+    currency: str = "RUB"               # техническое значение (ложная мультивалютность удалена)
     is_template: bool = False
     created_at: str = ""
     updated_at: str | None = None
     # присоединяемые поля для отображения
-    category_name: str = field(default="")
-    category_type: str = field(default="")
+    category_name: str = ""
+    category_type: str = ""
+
+
+# ---------- служебное для SQL ----------
+
+_ALLOWED_ORDERS = {
+    "date DESC, id DESC", "date ASC, id ASC",
+    "amount_minor DESC, id DESC", "amount_minor ASC, id ASC",
+    "c.name COLLATE NOCASE ASC, t.date DESC",
+    "c.name COLLATE NOCASE DESC, t.date DESC",
+}
+
+
+def build_filter_sql(f: TransactionFilter) -> tuple[str, list]:
+    """Единственный построитель WHERE+параметров для всех запросов по фильтру.
+
+    Возвращает ('условия', params) БЕЗ префикса WHERE. Копирование этой логики
+    в отдельные SQL-методы запрещено — иначе список и агрегаты разойдутся.
+    """
+    where = ["t.is_template = ?"]
+    params: list = [1 if f.templates else 0]
+    if f.search:
+        # Регистронезависимый поиск на стороне SQL, включая кириллицу:
+        # встроенная lower() SQLite работает только для ASCII, поэтому
+        # используется зарегистрированная Python-функция UNISTR_LOWER.
+        where.append(
+            "(UNISTR_LOWER(t.description) LIKE ? OR UNISTR_LOWER(c.name) LIKE ?)"
+        )
+        like = f"%{f.search.lower()}%"
+        params += [like, like]
+    if f.date_from:
+        where.append("t.date >= ?")
+        params.append(f.date_from)
+    if f.date_to:
+        where.append("t.date <= ?")
+        params.append(f.date_to)
+    if f.tx_type in ("income", "expense"):
+        where.append("t.type = ?")
+        params.append(f.tx_type)
+    if f.category_id is not None:
+        where.append("t.category_id = ?")
+        params.append(f.category_id)
+    return " AND ".join(where), params
 
 
 class Database:
@@ -61,10 +127,6 @@ class Database:
                 self._conn = sqlite3.connect(str(self.path))
                 self._conn.row_factory = sqlite3.Row
                 self._conn.execute("PRAGMA foreign_keys = ON")
-                # Встроенные lower()/UPPER() в SQLite работают только для
-                # ASCII — для регистронезависимого поиска (в т.ч. кириллицы)
-                # регистрируем детерминированные Python-функции; поиск
-                # по-прежнему выполняется на стороне SQL.
                 self._conn.create_function(
                     "UNISTR_LOWER", 1, lambda s: (s or "").lower(), deterministic=True)
                 self._conn.create_function(
@@ -74,16 +136,8 @@ class Database:
         return self._conn
 
     def connect(self) -> None:
-        """Открыть соединение; при удержании файла другим процессом — RuntimeError."""
-        conn = self.connection
-        try:
-            # попытка эксклюзивной блокировки: второй экземпляр не должен работать с той же БД
-            conn.execute("BEGIN IMMEDIATE")
-            conn.execute("COMMIT")
-        except sqlite3.OperationalError as exc:
-            if "locked" in str(exc).lower():
-                raise RuntimeError("Приложение уже открыто.") from exc
-            raise DatabaseError(str(exc)) from exc
+        """Открыть соединение. Межпроцессная блокировка — не здесь (QLockFile в main)."""
+        _ = self.connection
 
     def close(self) -> None:
         if self._conn is not None:
@@ -130,9 +184,10 @@ class Database:
         cat.created_at = cat.created_at or self._now()
         with self.transaction() as conn:
             cur = conn.execute(
-                "INSERT INTO categories (name, type, is_active, monthly_limit, created_at)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (cat.name, cat.type, int(cat.is_active), cat.monthly_limit, cat.created_at),
+                "INSERT INTO categories (name, type, is_active, monthly_limit_minor,"
+                " created_at) VALUES (?, ?, ?, ?, ?)",
+                (cat.name, cat.type, int(cat.is_active),
+                 int(cat.monthly_limit_minor), cat.created_at),
             )
             cat.id = cur.lastrowid
         return cat
@@ -142,9 +197,10 @@ class Database:
             raise DatabaseError("category.id отсутствует")
         with self.transaction() as conn:
             conn.execute(
-                "UPDATE categories SET name=?, type=?, is_active=?, monthly_limit=?"
+                "UPDATE categories SET name=?, type=?, is_active=?, monthly_limit_minor=?"
                 " WHERE id=?",
-                (cat.name, cat.type, int(cat.is_active), cat.monthly_limit, cat.id),
+                (cat.name, cat.type, int(cat.is_active),
+                 int(cat.monthly_limit_minor), cat.id),
             )
 
     def delete_category(self, category_id: int) -> None:
@@ -179,7 +235,7 @@ class Database:
             name=row["name"],
             type=row["type"],
             is_active=bool(row["is_active"]),
-            monthly_limit=float(row["monthly_limit"] or 0),
+            monthly_limit_minor=int(row["monthly_limit_minor"] or 0),
             created_at=row["created_at"],
         )
 
@@ -189,12 +245,13 @@ class Database:
         with self.transaction() as conn:
             cur = conn.execute(
                 "INSERT INTO transactions"
-                " (type, amount, category_id, date, description, currency,"
+                " (type, amount_minor, category_id, date, description, currency,"
                 "  is_template, created_at, updated_at)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    tr.type, tr.amount, tr.category_id, tr.date, tr.description,
-                    tr.currency, int(tr.is_template), tr.created_at, tr.updated_at,
+                    tr.type, int(tr.amount_minor), tr.category_id, tr.date,
+                    tr.description, tr.currency, int(tr.is_template),
+                    tr.created_at, tr.updated_at,
                 ),
             )
             tr.id = cur.lastrowid
@@ -206,12 +263,13 @@ class Database:
         tr.updated_at = self._now()
         with self.transaction() as conn:
             conn.execute(
-                "UPDATE transactions SET type=?, amount=?, category_id=?, date=?,"
+                "UPDATE transactions SET type=?, amount_minor=?, category_id=?, date=?,"
                 " description=?, currency=?, is_template=?, updated_at=?"
                 " WHERE id=?",
                 (
-                    tr.type, tr.amount, tr.category_id, tr.date, tr.description,
-                    tr.currency, int(tr.is_template), tr.updated_at, tr.id,
+                    tr.type, int(tr.amount_minor), tr.category_id, tr.date,
+                    tr.description, tr.currency, int(tr.is_template),
+                    tr.updated_at, tr.id,
                 ),
             )
 
@@ -228,66 +286,21 @@ class Database:
         ).fetchone()
         return self._row_to_transaction(row) if row else None
 
-    def list_transactions(
-        self,
-        *,
-        templates: bool = False,
-        search: str = "",
-        date_from: str = "",
-        date_to: str = "",
-        tx_type: str = "",
-        category_id: int | None = None,
-        order_by: str = "date DESC, id DESC",
-        limit: int | None = None,
-        offset: int = 0,
-    ) -> tuple[list[Transaction], int]:
-        """Возвращает (страница записей, общее количество). Шаблоны исключены, если templates=False."""
-        where = ["t.is_template = ?"]
-        params: list = [1 if templates else 0]
-        if search:
-            # Регистронезависимый поиск выполняется на стороне SQL.
-            # Встроенная lower() SQLite работает только для ASCII, поэтому
-            # используется зарегистрированная Python-функция UNISTR_LOWER
-            # (полный Unicode-lower, включая кириллицу).
-            where.append(
-                "(UNISTR_LOWER(t.description) LIKE ?"
-                " OR UNISTR_LOWER(c.name) LIKE ?)"
-            )
-            like = f"%{search.lower()}%"
-            params += [like, like]
-        if date_from:
-            where.append("t.date >= ?")
-            params.append(date_from)
-        if date_to:
-            where.append("t.date <= ?")
-            params.append(date_to)
-        if tx_type in ("income", "expense"):
-            where.append("t.type = ?")
-            params.append(tx_type)
-        if category_id is not None:
-            where.append("t.category_id = ?")
-            params.append(category_id)
-
-        allowed_orders = {
-            "date DESC, id DESC", "date ASC, id ASC",
-            "amount DESC, id DESC", "amount ASC, id ASC",
-            "c.name COLLATE NOCASE ASC, t.date DESC", "c.name COLLATE NOCASE DESC, t.date DESC",
-        }
-        if order_by not in allowed_orders:
+    # ---------- единый фильтр: строки + агрегаты ----------
+    def list_transactions(self, filter: TransactionFilter, *,
+                          order_by: str = "date DESC, id DESC",
+                          limit: int | None = None,
+                          offset: int = 0) -> tuple[list[Transaction], int]:
+        """Возвращает (страница записей, общее количество по всему фильтру)."""
+        if order_by not in _ALLOWED_ORDERS:
             order_by = "date DESC, id DESC"
-
-        where_sql = " AND ".join(where)
+        where_sql, params = build_filter_sql(filter)
+        base = ("FROM transactions t JOIN categories c ON c.id = t.category_id"
+                f" WHERE {where_sql}")
         total = self.connection.execute(
-            f"SELECT COUNT(*) AS c FROM transactions t JOIN categories c ON c.id = t.category_id"
-            f" WHERE {where_sql}",
-            params,
-        ).fetchone()["c"]
-
-        q = (
-            "SELECT t.*, c.name AS category_name, c.type AS category_type"
-            " FROM transactions t JOIN categories c ON c.id = t.category_id"
-            f" WHERE {where_sql} ORDER BY {order_by}"
-        )
+            f"SELECT COUNT(*) AS c {base}", params).fetchone()["c"]
+        q = ("SELECT t.*, c.name AS category_name, c.type AS category_type"
+             f"{base} ORDER BY {order_by}")
         page_params = list(params)
         if limit is not None:
             q += " LIMIT ? OFFSET ?"
@@ -295,13 +308,36 @@ class Database:
         rows = self.connection.execute(q, page_params).fetchall()
         return [self._row_to_transaction(r) for r in rows], int(total)
 
+    def summary(self, filter: TransactionFilter) -> dict:
+        """Агрегаты по ТОМУ ЖЕ фильтру, что и список (FR-03). Денежные — int minor."""
+        where_sql, params = build_filter_sql(filter)
+        row = self.connection.execute(
+            "SELECT"
+            " COALESCE(SUM(CASE WHEN t.type='income' THEN t.amount_minor ELSE 0 END), 0)"
+            "   AS income_minor,"
+            " COALESCE(SUM(CASE WHEN t.type='expense' THEN t.amount_minor ELSE 0 END), 0)"
+            "   AS expense_minor,"
+            " COUNT(*) AS cnt"
+            " FROM transactions t JOIN categories c ON c.id = t.category_id"
+            f" WHERE {where_sql}",
+            params,
+        ).fetchone()
+        income = int(row["income_minor"])
+        expense = int(row["expense_minor"])
+        return {
+            "income_minor": income,
+            "expense_minor": expense,
+            "balance_minor": income - expense,
+            "count": int(row["cnt"]),
+        }
+
     @staticmethod
     def _row_to_transaction(row: sqlite3.Row) -> Transaction:
         keys = row.keys()
         return Transaction(
             id=row["id"],
             type=row["type"],
-            amount=float(row["amount"]),
+            amount_minor=int(row["amount_minor"]),
             category_id=row["category_id"],
             date=row["date"],
             description=row["description"] or "",
@@ -313,54 +349,56 @@ class Database:
             category_type=row["category_type"] if "category_type" in keys else "",
         )
 
-    # ---------- агрегаты ----------
-    def period_totals(self, *, date_from: str, date_to: str, templates: bool = False) -> dict:
-        """Доходы/расходы/баланс за период (по операциям в базовой валюте)."""
-        row = self.connection.execute(
-            "SELECT"
-            " COALESCE(SUM(CASE WHEN t.type='income' THEN t.amount ELSE 0 END), 0) AS income,"
-            " COALESCE(SUM(CASE WHEN t.type='expense' THEN t.amount ELSE 0 END), 0) AS expense"
-            " FROM transactions t WHERE t.is_template = ? AND t.date >= ? AND t.date <= ?",
-            (1 if templates else 0, date_from, date_to),
-        ).fetchone()
-        income = float(row["income"])
-        expense = float(row["expense"])
-        return {"income": income, "expense": expense, "balance": income - expense}
+    # ---------- агрегаты для дашборда (совместимость с integer money) ----------
+    def period_totals(self, *, date_from: str, date_to: str,
+                      templates: bool = False) -> dict:
+        """Доходы/расходы/баланс за период в minor. Частный случай TransactionFilter."""
+        f = TransactionFilter(date_from=date_from, date_to=date_to,
+                              templates=templates)
+        s = self.summary(f)
+        return {
+            "income_minor": s["income_minor"],
+            "expense_minor": s["expense_minor"],
+            "balance_minor": s["balance_minor"],
+        }
 
     def daily_totals(self, *, date_from: str, date_to: str) -> list[dict]:
-        """Разбивка доходов/расходов по дням периода (шаблоны не учитываются)."""
+        """Разбивка доходов/расходов по дням периода (шаблоны исключены), minor."""
         rows = self.connection.execute(
             "SELECT date,"
-            " COALESCE(SUM(CASE WHEN type='income' THEN amount ELSE 0 END), 0) AS income,"
-            " COALESCE(SUM(CASE WHEN type='expense' THEN amount ELSE 0 END), 0) AS expense"
+            " COALESCE(SUM(CASE WHEN type='income' THEN amount_minor ELSE 0 END), 0)"
+            "   AS income_minor,"
+            " COALESCE(SUM(CASE WHEN type='expense' THEN amount_minor ELSE 0 END), 0)"
+            "   AS expense_minor"
             " FROM transactions WHERE is_template = 0 AND date >= ? AND date <= ?"
             " GROUP BY date ORDER BY date",
             (date_from, date_to),
         ).fetchall()
         return [
-            {"date": r["date"], "income": float(r["income"]),
-             "expense": float(r["expense"])}
+            {"date": r["date"], "income_minor": int(r["income_minor"]),
+             "expense_minor": int(r["expense_minor"])}
             for r in rows
         ]
 
-    def spent_by_category(self, month: str) -> dict[int, float]:
-        """Суммы расходов по категориям за месяц 'YYYY-MM' (шаблоны не учитываются)."""
+    def spent_by_category(self, month: str) -> dict[int, int]:
+        """Суммы расходов по категориям за месяц 'YYYY-MM' в minor (без шаблонов)."""
         rows = self.connection.execute(
-            "SELECT category_id, SUM(amount) AS s FROM transactions"
+            "SELECT category_id, SUM(amount_minor) AS s FROM transactions"
             " WHERE is_template = 0 AND type = 'expense' AND substr(date, 1, 7) = ?"
             " GROUP BY category_id",
             (month,),
         ).fetchall()
-        return {int(r["category_id"]): float(r["s"]) for r in rows}
+        return {int(r["category_id"]): int(r["s"]) for r in rows}
 
     def category_report(self, date_from: str, date_to: str) -> list[dict]:
-        """Сумма по каждой категории (тип/категория) за период."""
+        """Сумма по каждой категории (тип/категория) за период; деньги — minor."""
         rows = self.connection.execute(
             "SELECT c.id AS category_id, c.name AS name, c.type AS type,"
-            " c.monthly_limit AS monthly_limit, SUM(t.amount) AS total"
+            " c.monthly_limit_minor AS monthly_limit_minor,"
+            " SUM(t.amount_minor) AS total_minor"
             " FROM transactions t JOIN categories c ON c.id = t.category_id"
             " WHERE t.is_template = 0 AND t.date >= ? AND t.date <= ?"
-            " GROUP BY c.id ORDER BY total DESC",
+            " GROUP BY c.id ORDER BY total_minor DESC",
             (date_from, date_to),
         ).fetchall()
         return [
@@ -368,8 +406,8 @@ class Database:
                 "category_id": int(r["category_id"]),
                 "name": r["name"],
                 "type": r["type"],
-                "monthly_limit": float(r["monthly_limit"] or 0),
-                "total": float(r["total"]),
+                "monthly_limit_minor": int(r["monthly_limit_minor"] or 0),
+                "total_minor": int(r["total_minor"]),
             }
             for r in rows
         ]

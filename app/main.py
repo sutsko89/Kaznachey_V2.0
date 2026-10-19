@@ -1,91 +1,91 @@
-"""Запуск приложения: одиночный экземпляр, миграции, главное окно.
+"""Точка входа GUI «Казначей».
 
-Модуль безопасности отсутствует намеренно (однопользовательская редакция):
-нет ПИН-кода, пароля, регистрации, счётчика попыток и блокировок.
+Порядок старта (FR-07): получить lock выбранной БД ДО открытия файла и
+до запуска миграций; при неудаче — не открывать главное окно, не менять файл
+БД, показать сообщение и завершиться с ненулевым кодом.
 """
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 
-_ROOT = str(Path(__file__).resolve().parent.parent)
-if _ROOT not in sys.path:
-    sys.path.insert(0, _ROOT)
+from PyQt6.QtWidgets import QApplication, QMessageBox
 
-from app.dal.database import Database, default_db_path  # noqa: E402
-from app.errors import BackupError, MigrationError  # noqa: E402
-from app.services.migrations import run_migrations  # noqa: E402
-
-
-def migrations_dir() -> Path:
-    """Папка migrations/ рядом с исполняемым файлом (или исходниками)."""
-    if getattr(sys, "frozen", False):
-        base = Path(sys.executable).parent
-    else:
-        base = Path(__file__).resolve().parent.parent
-    return base / "migrations"
+from app.dal.database import Database, default_db_path
+from app.errors import BackupError, DatabaseError, MigrationError
+from app.services.instance_lock import ALREADY_OPEN_MESSAGE, InstanceLock
+from app.services.migrations import bundled_migrations_dir, run_migrations
+from app.ui.main_window import MainWindow
+from app.ui.theme import apply_light_theme
 
 
-def open_database(db_path: Path | None = None) -> Database:
-    """Открывает БД, проверяет одиночность экземпляра и применяет миграции.
+def _critical(title: str, text: str) -> int:
+    """Показывает фатальную ошибку без главного окна; возвращает код завершения."""
+    app = QApplication.instance() or QApplication(sys.argv)
+    QMessageBox.critical(None, title, text)
+    return 1
 
-    Исключения:
-    - RuntimeError("Приложение уже открыто.") — второй экземпляр на той же БД;
-    - BackupError — не удалось создать бэкап перед миграцией;
-    - MigrationError — ошибка применения миграции.
+
+def bootstrap(db_path=None):
+    """Открывает приложение: lock → соединения → миграции. Возвращает (rc, payload).
+
+    rc == 0 — payload это (app, window, lock); иначе payload — текст ошибки.
+    Lock возвращается вызывающему коду и хранится в памяти до полного завершения.
     """
-    path = Path(db_path) if db_path else default_db_path()
-    db = Database(path)
-    db.connect()  # может поднять RuntimeError, если файл удерживается другим процессом
-    # app_settings появляется только после миграции 001 — до неё читаем из
-    # sqlite_master напрямую, чтобы не упасть на "no such table: app_settings".
-    backup_dir = _read_backup_dir_raw(db, path)
-    run_migrations(db, migrations_dir(), backup_dir)
-    return db
+    app = QApplication(sys.argv)
+    apply_light_theme(app)
 
+    path = default_db_path() if db_path is None else db_path
 
-def _read_backup_dir_raw(db: Database, path: Path) -> Path:
-    """Читает backup_path из app_settings, если таблица уже существует."""
-    from app.services.migrations import _app_settings_exists
-
+    # FR-16: встроенные миграции (frozen — из бандла, dev — из репозитория).
     try:
-        if _app_settings_exists(db.connection):
-            value = db.get_setting("backup_path")
-            if value:
-                return Path(value)
-    except Exception:
-        pass
-    return path.parent / "backups"
-
-
-def main(argv: list[str] | None = None) -> int:
-    args = list(argv if argv is not None else sys.argv[1:])
-    db_path = Path(args[0]) if args else default_db_path()
-
-    from PyQt6.QtCore import QT_VERSION_STR  # noqa: F401  (проверка доступности Qt)
-    from PyQt6.QtWidgets import QApplication, QMessageBox
-
-    from app.ui.main_window import MainWindow
-
-    app = QApplication(sys.argv[:1])
-    app.setApplicationName("Казначей")
-    from app.ui.theme import apply_light_theme
-    apply_light_theme(app)  # светлая тема — единственная
-    try:
-        db = open_database(db_path)
-    except RuntimeError as exc:
-        QMessageBox.warning(None, "Казначей", str(exc))
-        return 2
-    except BackupError as exc:
-        QMessageBox.critical(None, "Казначей", str(exc))
-        return 3
+        migrations_dir = bundled_migrations_dir()
     except MigrationError as exc:
-        QMessageBox.critical(None, "Казначей", f"Ошибка миграции базы данных. {exc}")
-        return 4
+        return 1, str(exc)
+
+    # FR-07: постоянная блокировка ДО открытия БД и миграций.
+    lock = InstanceLock(path)
+    if not lock.try_lock():
+        return 2, ALREADY_OPEN_MESSAGE
+
+    try:
+        db = Database(path)
+        db.connect()
+        run_migrations(db, migrations_dir, db_backup_dir(db))
+    except (MigrationError, BackupError, DatabaseError) as exc:
+        lock.unlock()
+        return 1, str(exc)
+    except Exception as exc:  # noqa: BLE001
+        lock.unlock()
+        return 1, f"Непредвиденная ошибка запуска: {exc}"
 
     window = MainWindow(db)
     window.show()
-    return app.exec()
+    return 0, (app, window, lock)
+
+
+def db_backup_dir(db: Database):
+    from pathlib import Path
+
+    raw = db.get_setting("backup_path")
+    if raw:
+        return Path(raw)
+    return Path(db.path).parent / "backups"
+
+
+def main() -> int:
+    args = [a for a in sys.argv[1:] if not a.startswith("-")]
+    db_path = args[0] if args else None
+    rc, payload = bootstrap(db_path)
+    if rc != 0:
+        _critical("Казначей", payload)
+        return rc if rc != 2 else 3
+    app, window, lock = payload
+    try:
+        code = app.exec()
+    finally:
+        # FR-07: штатное освобождение блокировки при выходе.
+        lock.unlock()
+    return code
 
 
 if __name__ == "__main__":
