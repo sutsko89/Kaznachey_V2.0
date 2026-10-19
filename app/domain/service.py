@@ -202,9 +202,9 @@ class TreasuryService:
         amount_minor: int | None = None,
     ) -> Transaction:
         resolved = (int(amount_minor) if amount_minor is not None
-                    else _legacy_to_minor(amount))
+                    else parse_amount_minor(amount))
         data = validate_transaction_fields(
-            type_=type_, amount=_to_minor(resolved),
+            type_=type_, amount=resolved,   # уже int minor — без повторной конвертации
             category_id=category_id, date=date, currency=currency
         )
         self._resolve_type(data["category_id"], data["type"])
@@ -233,12 +233,12 @@ class TreasuryService:
                 merged[key] = value
         if "amount" in fields and fields["amount"] is not None:
             # legacy-поле amount (рубли) конвертируется РОВНО ОДИН раз
-            merged["amount"] = _legacy_to_minor(fields["amount"])
+            merged["amount"] = parse_amount_minor(fields["amount"])
         resolved_minor = (int(amount_minor) if amount_minor is not None
                           else int(merged["amount"]))
         data = validate_transaction_fields(
             type_=merged["type"],
-            amount=_to_minor(resolved_minor),
+            amount=resolved_minor,   # уже int minor — без повторной конвертации
             category_id=merged["category_id"],
             date=merged["date"], currency="RUB")
         self._resolve_type(data["category_id"], data["type"])
@@ -287,9 +287,9 @@ class TreasuryService:
                                   amount_minor: int | None = None) -> Transaction:
         """Шаблон хранится в transactions с is_template=1; дата шаблона — дата создания."""
         resolved = (int(amount_minor) if amount_minor is not None
-                    else _legacy_to_minor(amount))
+                    else parse_amount_minor(amount))
         data = validate_transaction_fields(
-            type_=type_, amount=_to_minor(resolved),
+            type_=type_, amount=resolved,   # уже int minor
             category_id=category_id,
             date=self.today(), currency=currency,
         )
@@ -315,12 +315,12 @@ class TreasuryService:
                 merged[key] = value
         if "amount" in fields and fields["amount"] is not None:
             # legacy-поле amount (рубли) конвертируется РОВНО ОДИН раз
-            merged["amount"] = _legacy_to_minor(fields["amount"])
+            merged["amount"] = parse_amount_minor(fields["amount"])
         resolved_minor = (int(amount_minor) if amount_minor is not None
                           else int(merged["amount"]))
         data = validate_transaction_fields(
             type_=merged["type"],
-            amount=_to_minor(resolved_minor),
+            amount=resolved_minor,   # уже int minor
             category_id=merged["category_id"],
             date=tr.date, currency="RUB")
         self._resolve_type(data["category_id"], data["type"])
@@ -351,7 +351,7 @@ class TreasuryService:
             raise ValidationError({"id": "Шаблон не найден"})
         if amount_minor is None and amount is not None:
             # legacy amount (рубли) -> minor ровно один раз
-            amount_minor = _legacy_to_minor(amount)
+            amount_minor = parse_amount_minor(amount)
         elif amount_minor is None and amount is None:
             amount_minor = tpl.amount_minor      # уже minor — без конвертации
         return self.create_transaction(

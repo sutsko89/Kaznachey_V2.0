@@ -35,8 +35,6 @@ MONTH_NAMES = [
 # светлая тема — единственная; палитра берётся из app.ui.theme
 INCOME_COLOR_LIGHT = INCOME_COLOR
 EXPENSE_COLOR_LIGHT = EXPENSE_COLOR
-INCOME_COLOR_DARK = INCOME_COLOR
-EXPENSE_COLOR_DARK = EXPENSE_COLOR
 
 
 def _month_options() -> list[tuple[str, str]]:
@@ -86,9 +84,10 @@ class PairedBarsWidget(QWidget):
         self._data = data
         self.update()
 
-    def set_theme_colors(self, dark: bool) -> None:
-        self.income_color = INCOME_COLOR_DARK if dark else INCOME_COLOR_LIGHT
-        self.expense_color = EXPENSE_COLOR_DARK if dark else EXPENSE_COLOR_LIGHT
+    def set_theme_colors(self) -> None:
+        """Светлая тема — единственная; цвета всегда из палитры app.ui.theme."""
+        self.income_color = INCOME_COLOR_LIGHT
+        self.expense_color = EXPENSE_COLOR_LIGHT
         self.update()
 
     def paintEvent(self, event) -> None:  # noqa: N802 (Qt API)
@@ -445,14 +444,13 @@ class DashboardTab(QWidget):
         return date_from[:7] == date_to[:7]
 
     # ---------- обновление ----------
-    def apply_theme(self, dark: bool) -> None:
-        inc = INCOME_COLOR_DARK if dark else INCOME_COLOR_LIGHT
-        exp = EXPENSE_COLOR_DARK if dark else EXPENSE_COLOR_LIGHT
-        self.lbl_income.setStyleSheet(f"font-size: 22px; font-weight: 700; color: {inc};")
-        self.lbl_expense.setStyleSheet(f"font-size: 22px; font-weight: 700; color: {exp};")
-        self.bars.set_theme_colors(dark)
-        self.legend_income.setStyleSheet(f"color: {inc};")
-        self.legend_expense.setStyleSheet(f"color: {exp};")
+    def apply_theme(self) -> None:
+        """Светлая тема — единственная (FR-18: переключения темы удалено)."""
+        self.lbl_income.setStyleSheet(f"font-size: 22px; font-weight: 700; color: {INCOME_COLOR_LIGHT};")
+        self.lbl_expense.setStyleSheet(f"font-size: 22px; font-weight: 700; color: {EXPENSE_COLOR_LIGHT};")
+        self.bars.set_theme_colors()
+        self.legend_income.setStyleSheet(f"color: {INCOME_COLOR_LIGHT};")
+        self.legend_expense.setStyleSheet(f"color: {EXPENSE_COLOR_LIGHT};")
 
     def refresh(self) -> None:
         if not self._ready:

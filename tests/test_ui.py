@@ -22,7 +22,7 @@ CTRL = Qt.KeyboardModifier(_mod.value)
 from app.dal.database import Transaction  # noqa: E402
 from app.domain.service import format_amount_ru  # noqa: E402
 from app.ui.tabs.dashboard_tab import (  # noqa: E402
-    INCOME_COLOR_DARK, INCOME_COLOR_LIGHT)
+    INCOME_COLOR_LIGHT, EXPENSE_COLOR_LIGHT)
 from app.ui.dialogs_misc import CategoryDialog, TemplatePickerDialog  # noqa: E402
 from app.ui.dialogs_transaction import TransactionDialog  # noqa: E402
 from app.ui.main_window import MainWindow  # noqa: E402
@@ -67,7 +67,7 @@ class TestTransactionsTab:
         idx = dlg.category_combo.findData(category.id)
         assert idx >= 0, "категория расхода должна быть в списке диалога"
         dlg.category_combo.setCurrentIndex(idx)
-        dlg.amount_spin.setValue(250.0)
+        dlg.amount_edit.setText("250,00")
         dlg.description_edit.setText("Ужин")
         dlg._on_accept()
         assert dlg.saved is not None
@@ -78,7 +78,7 @@ class TestTransactionsTab:
         dlg = TransactionDialog(service)
         qtbot.addWidget(dlg)
         dlg.category_combo.clear()  # ни одной категории нет
-        dlg.amount_spin.setValue(10)
+        dlg.amount_edit.setText("10,00")
         dlg._on_accept()
         lbl = dlg.error_labels["category_id"]
         assert lbl.text() == "Категория обязательна"
@@ -129,7 +129,7 @@ class TestTransactionsTab:
         window._refresh_all()
         text = window.transactions_tab.summary_label.text()
         assert "Доходы:" in text and "Расходы:" in text and "Баланс:" in text
-        assert "600,00" in text
+        assert "600,00" in text.replace("\u2009", " ")
 
     def test_pagination_next_prev(self, window, service, category, monkeypatch):
         for i in range(30):
@@ -315,12 +315,13 @@ class TestSettingsTab:
         monkeypatch.setattr(QMessageBox, "information",
                             staticmethod(lambda *a, **k: None))
         tab = window.settings_tab
-        assert tab.theme_combo.count() == 1          # светлая — единственная тема
-        assert tab.theme_combo.itemText(0) == "Светлая"
+        # FR-18: ложные настройки (тема/валюта/форматы) полностью удалены из UI
+        for attr in ("theme_combo", "base_currency_combo",
+                     "date_format_combo", "number_format_combo"):
+            assert not hasattr(tab, attr)
         tab.scale_combo.setCurrentText("125%")
         tab.page_size_combo.setCurrentText("25")
         tab.btn_save_settings.click()
-        assert tab.service.get_setting("theme") == "light"
         assert tab.service.get_setting("ui_scale") == "125"
         assert tab.service.get_setting("page_size") == "25"
 
@@ -444,11 +445,11 @@ class TestDashboardTab:
         data = window.dashboard_tab.bars._data
         assert data and sum(v for _, v, _ in data) + sum(v for _, _, v in data) > 0
 
-    def test_theme_colors_apply(self, window, service):
-        window.dashboard_tab.apply_theme(True)
-        assert window.dashboard_tab.bars.income_color == INCOME_COLOR_DARK
-        window.dashboard_tab.apply_theme(False)
+    def test_theme_colors_are_light_only(self, window, service):
+        """Светлая тема — единственная; цвета всегда из палитры темы."""
+        window.dashboard_tab.apply_theme()
         assert window.dashboard_tab.bars.income_color == INCOME_COLOR_LIGHT
+        assert window.dashboard_tab.bars.expense_color == EXPENSE_COLOR_LIGHT
 
     def test_dashboard_subtabs_and_daily_breakdown(self, window, service, category, income_category):
         """Дашборд: три подвкладки; для месяца — разбивка по дням с суммами."""

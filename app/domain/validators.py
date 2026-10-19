@@ -36,7 +36,9 @@ def parse_amount_minor(value) -> int:
     if isinstance(value, bool):
         raise ValidationError({"amount": "Сумма должна быть числом"})
     if isinstance(value, int):
-        d = Decimal(value) * 100          # уже в minor единицах
+        d = Decimal(value)                # целые рубли -> minor ниже (*100 один раз)
+    elif isinstance(value, float):
+        d = Decimal(str(value))           # legacy float — ровно одна конвертация
     elif isinstance(value, Decimal):
         d = value
     else:
