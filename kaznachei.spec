@@ -1,8 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
 # PyInstaller-спецификация «Казначей» (ТЗ, раздел 4): .exe без необходимости установки Python.
 # Сборка:  pyinstaller kaznachei.spec
-# Миграции не включаются в бандл: по ТЗ 6.2 папка migrations/ располагается
-# рядом с исполняемым файлом и может обновляться независимо от приложения.
+# FR-16 (Этап 1): миграции включаются в бандл — exe самодостаточен и не требует
+# внешней папки migrations/. В frozen-режиме загрузчик читает SQL из sys._MEIPASS/migrations.
 
 block_cipher = None
 
@@ -10,7 +10,9 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[
+        ("migrations", "migrations"),
+    ],
     hiddenimports=['PyQt6.QtTest'],
     hookspath=[],
     hooksconfig={},

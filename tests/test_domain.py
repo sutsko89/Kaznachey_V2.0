@@ -36,8 +36,8 @@ class TestValidators:
     def test_transaction_all_errors_collected(self, service, category):
         with pytest.raises(ValidationError) as exc:
             service.create_transaction(
-                type_="wrong", amount=-5, category_id=0, date="не дата",
-                currency="РОБ")
+                type_="wrong", amount_minor=-500, category_id=0,
+                date="не дата", currency="РОБ")
         errs = exc.value.errors
         assert {"type", "amount", "category_id", "date", "currency"} <= set(errs)
 
@@ -49,7 +49,7 @@ class TestTransactions:
                                         description="Молоко")
         assert tr.id is not None and not tr.is_template
         got = service.db.get_transaction(tr.id)
-        assert got.amount == 100.5 and got.description == "Молоко"
+        assert got.amount_minor == 10050 and got.description == "Молоко"
 
     def test_zero_amount_rejected(self, service, category):
         with pytest.raises(ValidationError) as e:
@@ -73,8 +73,8 @@ class TestTransactions:
     def test_edit_transaction(self, service, category):
         tr = service.create_transaction(type_="expense", amount=10,
                                         category_id=category.id, date="2026-10-01")
-        edited = service.edit_transaction(tr.id, amount=20, description="изм.")
-        assert edited.amount == 20 and edited.description == "изм."
+        edited = service.edit_transaction(tr.id, amount_minor=2000, description="изм.")
+        assert edited.amount_minor == 2000 and edited.description == "изм."
         assert edited.updated_at is not None
 
     def test_edit_missing_transaction(self, service):
@@ -115,22 +115,22 @@ class TestTemplates:
 
         tr = service.use_template(tpl.id)
         assert not tr.is_template
-        assert tr.amount == 500 and tr.category_id == category.id
+        assert tr.amount_minor == 50000 and tr.category_id == category.id
         assert tr.date == TreasuryService.today()  # сегодняшняя дата
 
     def test_use_with_overrides(self, service, category):
         tpl = service.create_template_from_data(type_="expense", amount=500,
                                                 category_id=category.id)
-        tr = service.use_template(tpl.id, amount=700, date="2026-09-01",
+        tr = service.use_template(tpl.id, amount_minor=70000, date="2026-09-01",
                                   description="оплата за сентябрь")
-        assert tr.amount == 700 and tr.date == "2026-09-01"
+        assert tr.amount_minor == 70000 and tr.date == "2026-09-01"
 
     def test_edit_and_delete_template(self, service, category):
         tpl = service.create_template_from_data(type_="expense", amount=100,
                                                 category_id=category.id,
                                                 description="Связь")
-        service.edit_template(tpl.id, amount=200)
-        assert service.db.get_transaction(tpl.id).amount == 200
+        service.edit_template(tpl.id, amount_minor=20000)
+        assert service.db.get_transaction(tpl.id).amount_minor == 20000
         service.delete_template(tpl.id)
         assert service.list_templates() == []
 
@@ -169,7 +169,7 @@ class TestTemplates:
 class TestCategoriesAndLimits:
     def test_add_income_limit_forced_zero(self, service):
         cat = service.add_category("Зарплата", "income", monthly_limit=1000)
-        assert cat.monthly_limit == 0  # для доходов лимит не применяется
+        assert cat.monthly_limit_minor == 0  # для доходов лимит не применяется
 
     def test_duplicate_name_type(self, service):
         service.add_category("Продукты", "expense")
@@ -222,26 +222,26 @@ class TestCategoriesAndLimits:
         service.update_category(category.id, "Продукты", "expense", 1000)
         month = TreasuryService.current_month()
         today = TreasuryService.today()
-        service.create_transaction(type_="expense", amount=400,
+        service.create_transaction(type_="expense", amount_minor=40000,
                                    category_id=category.id, date=today)
         status = service.budget_status(month)
         row = next(s for s in status if s["category"].id == category.id)
-        assert row["spent"] == 400 and row["limit"] == 1000
-        assert row["percent"] == 40.0 and not row["over"]
+        assert row["spent"] == 40000 and row["limit"] == 100000
+        assert float(row["percent"]) == 40.0 and not row["over"]
 
-        service.create_transaction(type_="expense", amount=700,
+        service.create_transaction(type_="expense", amount_minor=70000,
                                    category_id=category.id, date=today)
         status = service.budget_status(month)
         row = next(s for s in status if s["category"].id == category.id)
-        assert row["spent"] == 1100 and row["over"]
+        assert row["spent"] == 110000 and row["over"]
 
     def test_overbudget_sorted_first(self, service):
-        c1 = service.add_category("Обычная", "expense", 100)
-        c2 = service.add_category("Я перерасход", "expense", 100)
+        c1 = service.add_category("Обычная", "expense", "100")
+        c2 = service.add_category("Я перерасход", "expense", "100")
         today = TreasuryService.today()
-        service.create_transaction(type_="expense", amount=50,
+        service.create_transaction(type_="expense", amount_minor=5000,
                                    category_id=c1.id, date=today)
-        service.create_transaction(type_="expense", amount=150,
+        service.create_transaction(type_="expense", amount_minor=15000,
                                    category_id=c2.id, date=today)
         status = service.budget_status()
         assert status[0]["category"].id == c2.id  # превышение — сверху
@@ -259,8 +259,8 @@ class TestCategoriesAndLimits:
         assert row["limit"] == 0 and row["percent"] is None and not row["over"]
 
     def test_templates_do_not_affect_limits(self, service, category):
-        service.update_category(category.id, "Продукты", "expense", 100)
-        service.create_transaction(type_="expense", amount=500,
+        service.update_category(category.id, "Продукты", "expense", "100")
+        service.create_transaction(type_="expense", amount_minor=50000,
                                    category_id=category.id,
                                    date=TreasuryService.today(), as_template=True)
         row = next(s for s in service.budget_status()
@@ -270,12 +270,12 @@ class TestCategoriesAndLimits:
 
 class TestSummariesAndReports:
     def test_period_summary(self, service, category, income_category):
-        service.create_transaction(type_="income", amount=1000,
+        service.create_transaction(type_="income", amount_minor=100000,
                                    category_id=income_category.id, date="2026-10-01")
-        service.create_transaction(type_="expense", amount=300,
+        service.create_transaction(type_="expense", amount_minor=30000,
                                    category_id=category.id, date="2026-10-05")
         s = service.period_summary("2026-10-01", "2026-10-31")
-        assert s == {"income": 1000, "expense": 300, "balance": 700}
+        assert s["income"] == 100000 and s["expense"] == 30000 and s["balance"] == 70000
 
     def test_period_summary_invalid_range(self, service):
         with pytest.raises(ValidationError):
@@ -290,25 +290,40 @@ class TestSummariesAndReports:
         inc_cat = service.add_category("Зарплата", "income")
         month = TreasuryService.current_month()
         first, last = TreasuryService.month_range(month)
-        service.create_transaction(type_="expense", amount=250,
+        service.create_transaction(type_="expense", amount_minor=25000,
                                    category_id=category.id, date=first)
-        service.create_transaction(type_="income", amount=750,
+        service.create_transaction(type_="income", amount_minor=75000,
                                    category_id=inc_cat.id, date=first)
         report = service.category_report(first, last)
         exp_row = next(r for r in report if r["category_id"] == category.id)
-        assert exp_row["share_percent"] == 25.0
-        assert exp_row["remaining_limit"] == 750
+        assert float(exp_row["share_percent"]) == 25.0
+        assert exp_row["remaining_limit"] == 75000
         inc_row = next(r for r in report if r["category_id"] == inc_cat.id)
         assert inc_row["remaining_limit"] is None
 
 
 class TestSettingsRules:
-    @pytest.mark.parametrize("key", ["base_currency", "db_version", "date_format",
-                                     "number_format", "ui_scale", "theme",
-                                     "page_size", "backup_path"])
-    def test_allowed_keys(self, service, key):
+    @pytest.mark.parametrize("key", ["ui_scale", "page_size", "backup_path"])
+    def test_user_keys_roundtrip(self, service, key):
+        """FR-19: пользователь может изменять только эти три ключа."""
         service.set_setting(key, "x")
         assert service.get_setting(key) == "x"
+
+    @pytest.mark.parametrize("key", ["base_currency", "date_format",
+                                     "number_format", "theme"])
+    def test_legacy_keys_not_writable_or_readable(self, service, key):
+        """FR-18/19: ложные настройки удалены из продукта (только read-only в БД)."""
+        with pytest.raises(ValidationError):
+            service.set_setting(key, "x")
+        with pytest.raises(ValidationError):
+            service.get_setting(key)
+
+    def test_db_version_internal_only(self, service):
+        """db_version изменяется только механизмом миграций (DAL), не сервисом."""
+        with pytest.raises(ValidationError):
+            service.set_setting("db_version", "9")
+        service.db.set_setting("db_version", "3")   # прямой путь DAL допустим
+        assert service.db.get_setting("db_version") == "3"
 
     @pytest.mark.parametrize("key", ["pin_hash", "password_hash",
                                      "login_attempts", "lock_until"])
@@ -330,10 +345,12 @@ class TestSettingsRules:
 
 class TestLocalizationFormats:
     def test_format_amount(self):
-        assert format_amount_ru(12345.67).replace("\u2009", " ") == "12 345,67"
+        """FR-11: вход — целые копейки, промежуточного float нет."""
+        assert format_amount_ru(1234567).replace("\u2009", " ") == "12 345,67"
         assert format_amount_ru(0) == "0,00"
-        assert format_amount_ru(-1000.5).replace("\u2009", " ") == "-1 000,50"
-        assert format_amount_ru(99.999) == "100,00"
+        assert format_amount_ru(1) == "0,01"
+        assert format_amount_ru(-100050).replace("\u2009", " ") == "-1 000,50"
+        assert format_amount_ru(123456).replace("\u2009", " ") == "1 234,56"
 
     def test_dates(self):
         assert to_display_date("2026-10-05") == "05.10.2026"

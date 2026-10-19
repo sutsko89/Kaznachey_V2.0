@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from app.dal.database import Category, Database, Transaction
+from app.dal.database import Category, Database, Transaction, TransactionFilter
 from app.errors import BackupError, RestoreError
 from app.services.backup import (
     backup_filename,
@@ -32,8 +32,8 @@ class TestBackupNamingAndCreation:
         assert re.match(r"kaznachei_backup_\d{8}_\d{6}_v2\.db$", dest.name)
         # копия — рабочая БД с теми же данными
         other = Database_copy(dest)
-        rows, total = other.list_transactions()
-        assert total == 1 and rows[0].amount == 111
+        rows, total = other.list_transactions(TransactionFilter())
+        assert total == 1 and rows[0].amount_minor == 11100
         other.close()
 
     def test_missing_db_raises(self, tmp_path, backup_dir):
@@ -98,8 +98,8 @@ class TestRestore:
         assert old_path.is_file()
 
         restored = Database_copy(db.path)
-        rows, total = restored.list_transactions()
-        assert total == 1 and rows[0].amount == 100
+        rows, total = restored.list_transactions(TransactionFilter())
+        assert total == 1 and rows[0].amount_minor == 10000
         restored.close()
 
     def test_restore_rejects_non_backup_file(self, db, tmp_path):
@@ -140,16 +140,19 @@ class TestCsvExport:
         count, raw, text = self.export(populated, tmp_path)
         assert raw.startswith(b"\xef\xbb\xbf")  # UTF-8 BOM для Excel
         lines = text.splitlines()
-        assert lines[0] == "дата;;тип;;категория;;сумма;;валюта;;комментарий"
+        # FR (раздел 6 ТЗ этапа 1): стандартный односимвольный разделитель ';',
+        # модуль csv с корректным quoting, колонка «валюта» удалена
+        assert lines[0] == "дата;тип;категория;сумма;комментарий"
         assert count == 2  # без шаблона
-        assert all(";;" in ln for ln in lines)
 
     def test_row_content(self, populated, tmp_path):
         _, _, text = self.export(populated, tmp_path)
         data_lines = text.splitlines()[1:]
-        assert data_lines[0].startswith("2026-10-01;;доход;;Зарплата;;1000,00;;RUB")
+        assert data_lines[0].startswith("2026-10-01;доход;Зарплата;1 000,00;Зарплата")
         taxi = next(ln for ln in data_lines if "Такси" in ln)
-        assert ";;расход;;Продукты;;1234,50;;RUB;;" in taxi
+        # описание с ; и кавычками экранируется модулем csv
+        assert ";расход;Продукты;1 234,50;" in taxi
+        assert '"Такси; ""комфорт"""' in taxi
 
     def test_export_respects_filters(self, populated, tmp_path):
         count, _, _ = self.export(populated, tmp_path, tx_type="income")

@@ -18,8 +18,15 @@ SEPARATOR = ";"
 
 
 def export_transactions_csv(db: Database, dest: str | Path,
-                            filter: TransactionFilter) -> int:
-    """Экспортирует отфильтрованные операции (без шаблонов). Возвращает число строк."""
+                            filter: TransactionFilter | None = None,
+                            **filter_kwargs) -> int:
+    """Экспортирует отфильтрованные операции (без шаблонов). Возвращает число строк.
+
+    Принимает тот же TransactionFilter, что и таблица/сводка (FR-01);
+    kwargs — удобный конструктор фильтра для тестов и вызывающего кода.
+    """
+    if filter is None:
+        filter = TransactionFilter(**filter_kwargs)
     if filter.templates:
         filter = TransactionFilter(
             search=filter.search, date_from=filter.date_from,

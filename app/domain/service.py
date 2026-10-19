@@ -201,8 +201,10 @@ class TreasuryService:
         description: str = "", currency: str = "RUB", as_template: bool = False,
         amount_minor: int | None = None,
     ) -> Transaction:
+        resolved = (int(amount_minor) if amount_minor is not None
+                    else _legacy_to_minor(amount))
         data = validate_transaction_fields(
-            type_=type_, amount=_amount_for_validate(amount, amount_minor),
+            type_=type_, amount=_to_minor(resolved),
             category_id=category_id, date=date, currency=currency
         )
         self._resolve_type(data["category_id"], data["type"])
@@ -223,18 +225,20 @@ class TreasuryService:
         if tr is None:
             raise ValidationError({"id": "Операция не найдена"})
         allowed = ("type", "amount", "category_id", "date", "description")
-        merged = {"type": tr.type, "amount": tr.amount_minor,
+        merged = {"type": tr.type, "amount": tr.amount_minor,   # minor
                   "category_id": tr.category_id, "date": tr.date,
                   "description": tr.description}
         for key, value in fields.items():
             if key in allowed:
                 merged[key] = value
-        if "amount" in fields:
-            # legacy-поле amount (рубли) конвертируется ровно один раз
-            merged["amount"] = _amount_for_validate(fields["amount"], None)
+        if "amount" in fields and fields["amount"] is not None:
+            # legacy-поле amount (рубли) конвертируется РОВНО ОДИН раз
+            merged["amount"] = _legacy_to_minor(fields["amount"])
+        resolved_minor = (int(amount_minor) if amount_minor is not None
+                          else int(merged["amount"]))
         data = validate_transaction_fields(
             type_=merged["type"],
-            amount=_amount_for_validate(merged["amount"], amount_minor),
+            amount=_to_minor(resolved_minor),
             category_id=merged["category_id"],
             date=merged["date"], currency="RUB")
         self._resolve_type(data["category_id"], data["type"])
@@ -255,15 +259,19 @@ class TreasuryService:
         date_str = to_display_date(tr.date)
         return f"Удалить операцию на сумму {amount_str} от {date_str}?"
 
-    def list_transactions(self, filter: TransactionFilter, *,
+    def list_transactions(self, filter: TransactionFilter | None = None, *,
                           order_by: str = "date DESC, id DESC",
                           limit: int | None = None,
                           offset: int = 0) -> tuple[list[Transaction], int]:
+        if filter is None:
+            filter = TransactionFilter()
         return self.db.list_transactions(filter, order_by=order_by,
                                          limit=limit, offset=offset)
 
-    def summary(self, filter: TransactionFilter) -> dict:
+    def summary(self, filter: TransactionFilter | None = None) -> dict:
         """Сводка по той же выборке, что и таблица (FR-03)."""
+        if filter is None:
+            filter = TransactionFilter()
         return self.db.summary(filter)
 
     # ---------- шаблоны ----------
@@ -278,8 +286,10 @@ class TreasuryService:
                                   currency: str = "RUB",
                                   amount_minor: int | None = None) -> Transaction:
         """Шаблон хранится в transactions с is_template=1; дата шаблона — дата создания."""
+        resolved = (int(amount_minor) if amount_minor is not None
+                    else _legacy_to_minor(amount))
         data = validate_transaction_fields(
-            type_=type_, amount=_amount_for_validate(amount, amount_minor),
+            type_=type_, amount=_to_minor(resolved),
             category_id=category_id,
             date=self.today(), currency=currency,
         )
@@ -303,12 +313,14 @@ class TreasuryService:
         for key, value in fields.items():
             if key in allowed:
                 merged[key] = value
-        if "amount" in fields:
-            # legacy-поле amount (рубли) конвертируется ровно один раз
-            merged["amount"] = _amount_for_validate(fields["amount"], None)
+        if "amount" in fields and fields["amount"] is not None:
+            # legacy-поле amount (рубли) конвертируется РОВНО ОДИН раз
+            merged["amount"] = _legacy_to_minor(fields["amount"])
+        resolved_minor = (int(amount_minor) if amount_minor is not None
+                          else int(merged["amount"]))
         data = validate_transaction_fields(
             type_=merged["type"],
-            amount=_amount_for_validate(merged["amount"], amount_minor),
+            amount=_to_minor(resolved_minor),
             category_id=merged["category_id"],
             date=tr.date, currency="RUB")
         self._resolve_type(data["category_id"], data["type"])
@@ -337,12 +349,15 @@ class TreasuryService:
         tpl = self.db.get_transaction(template_id)
         if tpl is None or not tpl.is_template:
             raise ValidationError({"id": "Шаблон не найден"})
+        if amount_minor is None and amount is not None:
+            # legacy amount (рубли) -> minor ровно один раз
+            amount_minor = _legacy_to_minor(amount)
+        elif amount_minor is None and amount is None:
+            amount_minor = tpl.amount_minor      # уже minor — без конвертации
         return self.create_transaction(
             type_=tpl.type,
-            amount=None if (amount is None or amount_minor is not None)
-            else _amount_for_validate(amount, None),
-            amount_minor=tpl.amount_minor if amount is None and amount_minor is None
-            else amount_minor,
+            amount=None,
+            amount_minor=int(amount_minor),
             category_id=tpl.category_id,
             date=date or self.today(),
             description=tpl.description if description is None else description,
@@ -355,7 +370,12 @@ class TreasuryService:
         validate_date(date_to)
         if date_from > date_to:
             raise ValidationError({"date_from": EMPTY_PERIOD_MESSAGE})
-        return self.db.summary(TransactionFilter(date_from=date_from, date_to=date_to))
+        s = self.db.summary(TransactionFilter(date_from=date_from, date_to=date_to))
+        # канонические *_minor-ключи + алиасы для совместимости потребителей
+        return {**s,
+                "income": s["income_minor"],
+                "expense": s["expense_minor"],
+                "balance": s["balance_minor"]}
 
     def daily_breakdown(self, date_from: str, date_to: str) -> list[dict]:
         """Разбивка доходов/расходов по дням периода (для дашборда), minor."""
@@ -391,6 +411,57 @@ class TreasuryService:
 EMPTY_PERIOD_MESSAGE = "Дата начала не может быть позже даты окончания."
 
 
+def _legacy_to_minor(value) -> int:
+    """Legacy-сумма в рублях (int/float/Decimal/str) -> minor. Конверсия ровно одна."""
+    if isinstance(value, bool):
+        raise ValidationError({"amount": "Сумма должна быть числом"})
+    if isinstance(value, int):
+        minor = value * 100
+    elif isinstance(value, float):
+        d = Decimal(str(value)).scaleb(2)
+        if d != d.to_integral_value():
+            raise ValidationError(
+                {"amount": "Допускается не более двух знаков после запятой"})
+        minor = int(d)
+    elif isinstance(value, Decimal):
+        d = value.scaleb(2)
+        if d != d.to_integral_value():
+            raise ValidationError(
+                {"amount": "Допускается не более двух знаков после запятой"})
+        minor = int(d)
+    else:
+        return parse_amount_minor(str(value))
+    if abs(minor) > MAX_MINOR:
+        raise ValidationError({"amount": "Слишком большое значение суммы"})
+    return minor
+
+
+def _to_minor(value) -> int:
+    """Нормализация денежного значения в minor БЕЗ повторной конвертации.
+
+    Числа (int/float/Decimal) трактуются уже как минимальные единицы —
+    их нельзя умножать на 100 повторно (см. требование «ровно одна
+    конвертация»). Строки разбираются парсером FR-10 и возвращаются как есть.
+    Используется на путях, где значение уже могло быть сконвертировано
+    (_legacy_to_minor / parse_amount_minor).
+    """
+    if isinstance(value, bool):
+        raise ValidationError({"amount": "Сумма должна быть числом"})
+    if isinstance(value, int):
+        minor = value
+    elif isinstance(value, (float, Decimal)):
+        d = Decimal(str(value)) if isinstance(value, float) else value
+        if d != d.to_integral_value():
+            raise ValidationError(
+                {"amount": "Допускается не более двух знаков после запятой"})
+        minor = int(d)
+    else:
+        return parse_amount_minor(str(value))
+    if abs(minor) > MAX_MINOR:
+        raise ValidationError({"amount": "Слишком большое значение суммы"})
+    return minor
+
+
 def _amount_for_validate(amount, amount_minor: int | None):
     """Выбор денежного значения для валидации.
 
@@ -408,9 +479,22 @@ def _amount_for_validate(amount, amount_minor: int | None):
     if isinstance(amount, bool):
         raise ValidationError({"amount": "Сумма должна быть числом"})
     if isinstance(amount, int):
-        return int(amount)                       # уже minor (merged/DAL)
+        # legacy int трактуется как рубли -> minor ровно один раз;
+        # канонический internal-путь всегда передаёт явный amount_minor
+        minor = int(amount) * 100
+        if abs(minor) > MAX_MINOR:
+            raise ValidationError({"amount": "Слишком большое значение суммы"})
+        return minor
     if isinstance(amount, float):
-        d = Decimal(str(amount)).scaleb(2)       # рубли -> minor, ровно один раз
+        # legacy float трактуем как рубли и конвертируем РОВНО ОДИН раз;
+        # значения вроде 100.5 нормализуются banker-style к целым копейкам
+        d = Decimal(str(amount)).scaleb(2)
+        if d != d.to_integral_value():
+            d = d.quantize(Decimal("1"))         # 10050.0 -> 10050 minor (100,50 руб)
+        minor = int(d)
+        if abs(minor) > MAX_MINOR:
+            raise ValidationError({"amount": "Слишком большое значение суммы"})
+        return minor
         if d != d.to_integral_value():
             raise ValidationError(
                 {"amount": "Допускается не более двух знаков после запятой"})
