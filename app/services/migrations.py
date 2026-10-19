@@ -88,14 +88,20 @@ def run_migrations(db, migrations_dir: str | Path, backup_dir: str | Path) -> li
 
     migrations = load_migrations(migrations_dir)
     conn = db.connection
-    current = _read_version(conn)
+    # Версия схемы хранится в таблице schema_version (ТЗ 6.1); таблица
+    # app_settings создаётся миграцией 001, поэтому до неё версия — 0.
+    if not _has_table(conn, "schema_version"):
+        current = 0
+    else:
+        current = _max_version(conn)
     applied: list[int] = []
     for version, path in migrations:
         if version <= current:
             continue
         sql = path.read_text(encoding="utf-8")
-        # 1. Резервная копия до изменения (если файл БД уже существует).
-        if Path(db.path).is_file() and Path(db.path).stat().st_size > 0:
+        # 1. Резервная копия до изменения схемы (если в файле БД уже есть
+        #    данные; пустой/неполный файл sqlite3.backup не создаёт).
+        if _db_file_has_content(db.path):
             try:
                 create_backup(db.path, backup_dir, current_version=current)
             except BackupError:
@@ -109,11 +115,6 @@ def run_migrations(db, migrations_dir: str | Path, backup_dir: str | Path) -> li
             conn.execute("BEGIN")
             try:
                 _exec_migration_sql(conn, sql)
-                conn.execute(
-                    "INSERT INTO app_settings (key, value) VALUES ('db_version', ?)"
-                    " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    (str(version),),
-                )
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -122,18 +123,135 @@ def run_migrations(db, migrations_dir: str | Path, backup_dir: str | Path) -> li
             raise MigrationError(
                 f"Миграция {path.name} не выполнена; изменения откачены: {exc}"
             ) from exc
+        # 4. Учёт версии — отдельной транзакцией ПОСЛЕ успешного применения
+        #    миграции (ТЗ 6.3): schema_version + db_version в app_settings.
+        #    Так фиксация версии не входит в откатываемую транзакцию самой
+        #    миграции и не мешает проверке «бэкап до любой записи в БД».
+        try:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS schema_version ("
+                " version INTEGER NOT NULL PRIMARY KEY,"
+                " applied_at TEXT NOT NULL)")
+            conn.execute(
+                "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)"
+                " ON CONFLICT(version) DO NOTHING",
+                (version, dt.datetime.now().isoformat(timespec="seconds")),
+            )
+            # зеркалим версию в app_settings только если таблица настроек
+            # уже существует (её создаёт штатная миграция 001)
+            if _has_table(conn, "app_settings"):
+                conn.execute(
+                    "INSERT INTO app_settings (key, value) VALUES ('db_version', ?)"
+                    " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (str(version),),
+                )
+            conn.commit()
+        except sqlite3.Error as exc:
+            raise MigrationError(
+                f"Не удалось зафиксировать версию {version}: {exc}"
+            ) from exc
         applied.append(version)
     return applied
+
+def _has_table(conn: sqlite3.Connection, name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone()
+    return row is not None
+
+
+def _max_version(conn: sqlite3.Connection) -> int:
+    """Максимальная применённая версия из schema_version (или 0)."""
+    try:
+        row = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+    except sqlite3.Error:
+        return 0
+
+
+def _db_file_has_content(path: str | Path) -> bool:
+    """True, если файл БД существует и содержит неотформатированные страницы
+    (т.е. в него уже что-то записано) — тогда нужен бэкап перед миграцией."""
+    p = Path(path)
+    if not p.is_file():
+        return False
+    try:
+        with p.open("rb") as fh:
+            header = fh.read(100)
+    except OSError:
+        return False
+    return len(header) == 100 and header[8:11] != b"\x00\x00\x00"
+
+
+
+def split_sql_statements(sql: str) -> list[str]:
+    """Разбивает SQL-скрипт на отдельные инструкции БЕЗ split(";").
+
+    Используется корректный сканер на базе sqlite3.complete_statement():
+    он понимает строковые литералы ('...', "..."), quoted-идентификаторы
+    ([...] / `...`), комментарии (-- и /* */) и не режет скрипт по точке с
+    запятой внутри комментария или строки. Комментарии и пустые фрагменты
+    отбрасываются, каждая возвращаемая инструкция содержит только исполняемый
+    SQL (безопасно для conn.execute).
+    """
+    statements: list[str] = []
+    buf: list[str] = []
+    i, n = 0, len(sql)
+    while i < n:
+        ch = sql[i]
+        # однострочный комментарий -- ... до конца строки: отбрасывается,
+        # точка с запятой ВНУТРИ него не завершает инструкцию
+        if ch == "-" and sql.startswith("--", i):
+            end = sql.find("\n", i)
+            i = n if end == -1 else end + 1
+            continue
+        # блочный комментарий /* ... */: отбрасывается целиком
+        if ch == "/" and sql.startswith("/*", i):
+            end = sql.find("*/", i + 2)
+            i = n if end == -1 else end + 2
+            continue
+        # строковые литералы и quoted-идентификаторы — копируем целиком
+        if ch in ("'", '"', "[", "`"):
+            closing = {"'": "'", '"': '"', "[": "]", "`": "`"}[ch]
+            j = i + 1
+            while j < n:
+                if sql[j] == closing:
+                    if j + 1 < n and sql[j + 1] == closing:  # удвоенная кавычка
+                        j += 2
+                        continue
+                    j += 1
+                    break
+                j += 1
+            else:
+                j = n  # незакрытый — берём до конца
+            buf.append(sql[i:j])
+            i = j
+            continue
+        if ch == ";":
+            stmt = "".join(buf).strip()
+            # complete_statement подтверждает завершённость инструкции
+            if stmt and sqlite3.complete_statement(stmt + ";"):
+                statements.append(stmt)
+            buf = []
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    # хвост без завершающей ";" (например, комментарий удалён, а SQL остался)
+    tail = "".join(buf).strip()
+    if tail:
+        statements.append(tail)
+    return statements
 
 
 def _exec_migration_sql(conn: sqlite3.Connection, sql: str) -> None:
     """Выполняет скрипт миграции внутри уже открытой транзакции.
 
     executescript самовольно делает COMMIT, поэтому инструкции разделяются
-    вручную (миграции содержат только простые statements без триггеров).
+    корректным парсером split_sql_statements (на основе
+    sqlite3.complete_statement), а не split(";").
     """
-    statements = [s.strip() for s in sql.split(";") if s.strip()]
-    for stmt in statements:
+    for stmt in split_sql_statements(sql):
         conn.execute(stmt)
 
 

@@ -207,8 +207,8 @@ class BudgetsTab(QWidget):
         for i, r in enumerate(report):
             remaining = ""
             if r["remaining_limit"] is not None:
-                remaining = format_amount_ru(r["remaining_limit"])
-                if r["remaining_limit"] < 0:
+                remaining = format_amount_ru(r["remaining_limit_minor"])
+                if r["remaining_limit_minor"] < 0:
                     remaining = "-" + remaining[1:] if remaining.startswith("-") else remaining
             cells = [
                 r["name"] + (" (доход)" if r["type"] == "income" else ""),
@@ -219,13 +219,16 @@ class BudgetsTab(QWidget):
             for j, text in enumerate(cells):
                 item = QTableWidgetItem(text)
                 if r["type"] == "expense" and r["monthly_limit"] > 0 \
-                        and r["remaining_limit"] is not None and r["remaining_limit"] < 0:
+                        and r["remaining_limit_minor"] is not None \
+                        and r["remaining_limit_minor"] < 0:
                     item.setForeground(QColor(DANGER))
                 self.report_table.setItem(i, j, item)
+        self._update_buttons()
 
     # ---------- выделение и действия ----------
     def _select(self, category_id: int, widget: QWidget) -> None:
         self.selected_category_id = category_id
+        self._update_buttons()
         for i in range(self.list_layout.count()):
             w = self.list_layout.itemAt(i).widget()
             if w is not None and w.property("category_id") is not None:
@@ -235,23 +238,29 @@ class BudgetsTab(QWidget):
                     w.setStyleSheet("background: #ffffff; border-bottom: 1px solid #eef0f3;")
 
     def _selected_category(self) -> Category | None:
-        # Если ничего не выбрано — автоматически выбираем первую видимую
-        # категорию: кнопки «Редактировать/Удалить/Деактивировать» всегда рабочие.
+        """FR-14: действие применяется ТОЛЬКО к явно выбранной пользователем
+        категории. Автовыбор первой запрещён; без выбора возвращаем None."""
         if self.selected_category_id is None:
-            for i in range(self.list_layout.count()):
-                w = self.list_layout.itemAt(i).widget()
-                if w is not None and w.property("category_id") is not None:
-                    cid = int(w.property("category_id"))
-                    self._select(cid, w)
-                    break
-        if self.selected_category_id is None:
-            QMessageBox.information(self, "Казначей", "Нет ни одной категории.")
             return None
         cat = self.service.db.get_category(self.selected_category_id)
         if cat is None:  # категория могла быть удалена — сбрасываем выбор
             self.selected_category_id = None
-            QMessageBox.information(self, "Казначей", "Сначала выберите категорию.")
+            self._update_buttons()
         return cat
+
+    def _update_buttons(self) -> None:
+        """FR-14/15: destructive-кнопки active только при явном выборе;
+        подпись переключателя зависит от состояния выбранной категории."""
+        has_sel = self.selected_category_id is not None
+        self.btn_edit.setEnabled(has_sel)
+        self.btn_delete.setEnabled(has_sel)
+        self.btn_toggle.setEnabled(has_sel)
+        if has_sel:
+            cat = self.service.db.get_category(self.selected_category_id)
+            self.btn_toggle.setText("Активировать" if (cat is not None and not cat.is_active)
+                                    else "Деактивировать")
+        else:
+            self.btn_toggle.setText("Деактивировать")
 
     def _edit_selected(self) -> None:
         cat = self._selected_category()
@@ -280,6 +289,7 @@ class BudgetsTab(QWidget):
             return
         self.selected_category_id = None
         self.refresh()
+        self._update_buttons()
 
     def _toggle_selected(self) -> None:
         cat = self._selected_category()

@@ -165,7 +165,17 @@ class Database:
         return dt.datetime.now().isoformat(timespec="seconds")
 
     # ---------- настройки ----------
+    def _has_settings_table(self) -> bool:
+        row = self.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='app_settings'"
+        ).fetchone()
+        return row is not None
+
     def get_setting(self, key: str, default: str | None = None) -> str | None:
+        # На новой (немигрированной) БД таблицы app_settings ещё нет —
+        # молча возвращаем default вместо OperationalError.
+        if not self._has_settings_table():
+            return default
         row = self.connection.execute(
             "SELECT value FROM app_settings WHERE key = ?", (key,)
         ).fetchone()
@@ -299,7 +309,7 @@ class Database:
                 f" WHERE {where_sql}")
         total = self.connection.execute(
             f"SELECT COUNT(*) AS c {base}", params).fetchone()["c"]
-        q = ("SELECT t.*, c.name AS category_name, c.type AS category_type"
+        q = ("SELECT t.*, c.name AS category_name, c.type AS category_type "
              f"{base} ORDER BY {order_by}")
         page_params = list(params)
         if limit is not None:

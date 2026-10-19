@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import re
 from decimal import Decimal
 from pathlib import Path
 
@@ -196,7 +197,7 @@ class TreasuryService:
         return requested_type
 
     def create_transaction(
-        self, *, type_: str, amount, category_id, date: str,
+        self, *, type_: str, amount=None, category_id, date: str,
         description: str = "", currency: str = "RUB", as_template: bool = False,
         amount_minor: int | None = None,
     ) -> Transaction:
@@ -228,6 +229,9 @@ class TreasuryService:
         for key, value in fields.items():
             if key in allowed:
                 merged[key] = value
+        if "amount" in fields:
+            # legacy-поле amount (рубли) конвертируется ровно один раз
+            merged["amount"] = _amount_for_validate(fields["amount"], None)
         data = validate_transaction_fields(
             type_=merged["type"],
             amount=_amount_for_validate(merged["amount"], amount_minor),
@@ -269,7 +273,7 @@ class TreasuryService:
             order_by="c.name COLLATE NOCASE ASC, t.date DESC")
         return rows
 
-    def create_template_from_data(self, *, type_: str, amount, category_id,
+    def create_template_from_data(self, *, type_: str, amount=None, category_id,
                                   description: str = "",
                                   currency: str = "RUB",
                                   amount_minor: int | None = None) -> Transaction:
@@ -299,6 +303,9 @@ class TreasuryService:
         for key, value in fields.items():
             if key in allowed:
                 merged[key] = value
+        if "amount" in fields:
+            # legacy-поле amount (рубли) конвертируется ровно один раз
+            merged["amount"] = _amount_for_validate(fields["amount"], None)
         data = validate_transaction_fields(
             type_=merged["type"],
             amount=_amount_for_validate(merged["amount"], amount_minor),
@@ -332,8 +339,10 @@ class TreasuryService:
             raise ValidationError({"id": "Шаблон не найден"})
         return self.create_transaction(
             type_=tpl.type,
-            amount=tpl.amount_minor if amount is None else amount,
-            amount_minor=amount_minor,
+            amount=None if (amount is None or amount_minor is not None)
+            else _amount_for_validate(amount, None),
+            amount_minor=tpl.amount_minor if amount is None and amount_minor is None
+            else amount_minor,
             category_id=tpl.category_id,
             date=date or self.today(),
             description=tpl.description if description is None else description,
@@ -370,7 +379,8 @@ class TreasuryService:
             if r["type"] == "expense" and r["monthly_limit_minor"] > 0:
                 spent = spent_map.get(r["category_id"], r["total_minor"])
                 remaining = r["monthly_limit_minor"] - spent   # целые minor
-            out.append({**r, "share_percent": share, "remaining_limit_minor": remaining})
+            out.append({**r, "share_percent": share, "remaining_limit_minor": remaining,
+                    "total": r["total_minor"], "monthly_limit": r["monthly_limit_minor"]})
         return out
 
 
@@ -381,16 +391,47 @@ def _amount_for_validate(amount, amount_minor: int | None):
     """Выбор денежного значения для валидации.
 
     UI всегда передаёт явный `amount_minor` (уже разобранный виджетом).
-    Если передано только legacy-поле `amount`: Decimal/int трактуются как
-    рубли (совместимость доменных тестов), str — разбирается по правилам
-    FR-10 через parse_amount_minor. float среди денег запрещён.
+    Если передано только legacy-поле `amount` (тесты/старые вызовы):
+    - Decimal и строки трактуются как РУБЛИ (или копейки при суффиксе minor
+      в строке — нет, строка это просто число рублей с знаками) -> умножаются
+      на 100 ровно один раз;
+    - int трактуется уже как minor (так делает DAL и внутренний merged);
+    - float переводится в minor через Decimal(str(...)) без двойного умножения.
+    Двойное умножение исключено: каждый путь конвертирует ровно один раз.
     """
     if amount_minor is not None:
         return int(amount_minor)
+    if isinstance(amount, bool):
+        raise ValidationError({"amount": "Сумма должна быть числом"})
+    if isinstance(amount, int):
+        return int(amount)                       # уже minor (merged/DAL)
     if isinstance(amount, float):
-        raise ValidationError(
-            {"amount": "float для денежных значений запрещён; используйте minor (int)"})
-    return amount
+        d = Decimal(str(amount)).scaleb(2)       # рубли -> minor, ровно один раз
+        if d != d.to_integral_value():
+            raise ValidationError(
+                {"amount": "Допускается не более двух знаков после запятой"})
+        minor = int(d)
+        if abs(minor) > MAX_MINOR:
+            raise ValidationError({"amount": "Слишком большое значение суммы"})
+        return minor
+    if isinstance(amount, Decimal):
+        d = amount.scaleb(2)                     # рубли -> minor, ровно один раз
+        if d != d.to_integral_value():
+            raise ValidationError(
+                {"amount": "Допускается не более двух знаков после запятой"})
+        minor = int(d)
+        if abs(minor) > MAX_MINOR:
+            raise ValidationError({"amount": "Слишком большое значение суммы"})
+        return minor
+    # строка: может быть minor-форматом ("123456") или рублёвым ("1 234,56").
+    # Правило FR-10: разделитель задает масштаб; без разделителя — рубли*100.
+    text = str(amount or "").strip().replace("\u2009", " ").replace("\u00a0", " ")
+    if re.fullmatch(r"-?\d+", text):
+        minor = int(text) * 100                  # целые рубли -> minor
+        if abs(minor) > MAX_MINOR:
+            raise ValidationError({"amount": "Слишком большое значение суммы"})
+        return minor
+    return parse_amount_minor(text)              # строка с копеек — рубли, *100 внутри
 
 
 # ---------- форматирование (локализация; без промежуточного float) ----------

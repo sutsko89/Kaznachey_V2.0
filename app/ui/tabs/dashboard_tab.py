@@ -465,9 +465,9 @@ class DashboardTab(QWidget):
             QMessageBox.critical(self, "Казначей", str(exc))
             return
 
-        income = float(summary.get("income", 0.0))
-        expense = float(summary.get("expense", 0.0))
-        balance = round(income - expense, 2)
+        income = int(summary["income_minor"])
+        expense = int(summary["expense_minor"])
+        balance = income - expense   # целые minor, без float
         self.lbl_income.setText(format_amount_ru(income))
         self.lbl_expense.setText(format_amount_ru(expense))
         self.lbl_balance.setText(format_amount_ru(balance))
@@ -496,8 +496,8 @@ class DashboardTab(QWidget):
             for d in range(1, days_in_month + 1):
                 rec = by_day.get(d)
                 data.append((str(d),
-                             rec["income"] if rec else 0.0,
-                             rec["expense"] if rec else 0.0))
+                             rec["income_minor"] if rec else 0,
+                             rec["expense_minor"] if rec else 0))
             self.bars.set_data(data)
             rows = daily
         else:
@@ -509,9 +509,9 @@ class DashboardTab(QWidget):
         self.table_daily.setRowCount(len(rows))
         for i, r in enumerate(rows):
             it_date = QTableWidgetItem(_fmt_day(r["date"]))
-            it_inc = QTableWidgetItem(format_amount_ru(r["income"]))
+            it_inc = QTableWidgetItem(format_amount_ru(r["income_minor"]))
             it_inc.setForeground(QColor(INCOME_COLOR))
-            it_exp = QTableWidgetItem(format_amount_ru(r["expense"]))
+            it_exp = QTableWidgetItem(format_amount_ru(r["expense_minor"]))
             it_exp.setForeground(QColor(EXPENSE_COLOR))
             for item in (it_inc, it_exp):
                 item.setTextAlignment(Qt.AlignmentFlag.AlignRight
@@ -551,8 +551,8 @@ class DashboardTab(QWidget):
             totals = self.service.db.period_totals(date_from=d1, date_to=d2)
             y, m = int(ym[:4]), int(ym[5:7])
             data.append((f"{MONTH_NAMES[m - 1][:3]} {y}",
-                         float(totals.get("income", 0.0)),
-                         float(totals.get("expense", 0.0))))
+                         int(totals["income_minor"]),
+                         int(totals["expense_minor"])))
         self.bars.set_data(data)
 
     @staticmethod

@@ -7,14 +7,15 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from pathlib import Path
 
 import pytest
 
 from app.dal.database import Database
 from app.errors import BackupError, MigrationError
 from app.services.migrations import (
-    find_migrations,
     get_current_version,
+    load_migrations,
     run_migrations,
 )
 
@@ -43,49 +44,51 @@ class TestFindMigrations:
             "002_b.sql": "SELECT 1;",
             "001_a.sql": "SELECT 1;",
         })
-        mfs = find_migrations(d)
-        assert [m.version for m in mfs] == [1, 2]
+        mfs = load_migrations(d)
+        assert [v for v, _ in mfs] == [1, 2]
 
     def test_ignores_foreign_files(self, tmp_path):
         d = make_migrations(tmp_path, {"001_a.sql": "SELECT 1;"})
         (d / "readme.txt").write_text("не миграция", encoding="utf-8")
         (d / "01_bad.sql").write_text("SELECT 1;", encoding="utf-8")
-        assert len(find_migrations(d)) == 1
+        assert len(load_migrations(d)) == 1
 
     def test_non_sequential_numbering_rejected(self, tmp_path):
         d = make_migrations(tmp_path, {
             "001_a.sql": "SELECT 1;",
             "003_c.sql": "SELECT 1;",
         })
-        with pytest.raises(MigrationError, match="последовательная"):
-            find_migrations(d)
+        with pytest.raises(MigrationError, match="нумерация"):
+            load_migrations(d)
 
     def test_missing_dir(self, tmp_path):
         with pytest.raises(MigrationError):
-            find_migrations(tmp_path / "nope")
+            load_migrations(tmp_path / "nope")
 
 
 class TestApplyOnEmptyDb:
     def test_all_migrations_applied(self, db_path, backup_dir):
         db = Database(db_path)
-        applied = run_migrations(db, MIG := (pytest.importorskip("pathlib").Path(__file__).resolve().parents[1] / "migrations"), backup_dir)
-        assert applied == [1, 2]
+        applied = run_migrations(db, ROOT_MIGRATIONS(), backup_dir)
+        assert applied == [1, 2, 3]
         assert table_names(db) >= EXPECTED_TABLES
-        assert get_current_version(db) == 2
-        assert db.get_setting("db_version") == "2"
+        assert get_current_version(db.path) == 3
+        assert db.get_setting("db_version") == "3"
         # записи о версиях в schema_version
         rows = db.connection.execute(
             "SELECT version FROM schema_version ORDER BY version").fetchall()
-        assert [r["version"] for r in rows] == [1, 2]
+        assert [r["version"] for r in rows] == [1, 2, 3]
         db.close()
 
     def test_final_schema_matches_tz(self, db: Database):
         """Итоговая схема соответствует ТЗ (раздел 8)."""
         cols = {c["name"] for c in db.connection.execute("PRAGMA table_info(categories)")}
-        assert cols == {"id", "name", "type", "is_active", "monthly_limit", "created_at"}
+        assert cols == {"id", "name", "type", "is_active", "monthly_limit", "created_at",
+                        "monthly_limit_minor"}
         cols = {c["name"] for c in db.connection.execute("PRAGMA table_info(transactions)")}
         assert cols == {"id", "type", "amount", "category_id", "date", "description",
-                        "currency", "is_template", "created_at", "updated_at"}
+                        "currency", "is_template", "created_at", "updated_at",
+                        "amount_minor"}
         cols = {c["name"] for c in db.connection.execute("PRAGMA table_info(app_settings)")}
         assert cols == {"key", "value"}
         cols = {c["name"] for c in db.connection.execute("PRAGMA table_info(schema_version)")}
@@ -95,11 +98,11 @@ class TestApplyOnEmptyDb:
         db = Database(db_path)
         run_migrations(db, ROOT_MIGRATIONS(), backup_dir)
         backups = list(backup_dir.glob("kaznachei_backup_*.db"))
-        # по одному бэкапу перед каждой из двух миграций
-        assert len(backups) == 2
+        # по одному бэкапу перед каждой из трёх миграций
+        assert len(backups) == 3
         names = sorted(b.name for b in backups)
         assert all(re.match(r"kaznachei_backup_\d{8}_\d{6}_v\d+\.db$", n) for n in names)
-        assert names[0].endswith("_v0.db") and names[1].endswith("_v1.db")
+        assert [n.rsplit("_v", 1)[1] for n in names] == ["0.db", "1.db", "2.db"]
         db.close()
 
     def test_backup_failure_blocks_migration(self, tmp_path, db_path):
@@ -134,9 +137,9 @@ class TestOldDatabaseUpgrade:
 
         db = Database(db_path)
         applied = run_migrations(db, ROOT_MIGRATIONS(), backup_dir)
-        assert applied == [2]
-        assert get_current_version(db) == 2
-        assert db.get_setting("db_version") == "2"
+        assert applied == [2, 3]
+        assert get_current_version(db.path) == 3
+        assert db.get_setting("db_version") == "3"
         idx = {r["name"] for r in db.connection.execute(
             "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%'")}
         assert "idx_transactions_type_date" in idx
@@ -179,3 +182,140 @@ class TestRollbackOnError:
         assert get_current_version(db) == 1
         assert "beta" not in table_names(db)
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# Этап 1, FR-09/FR-12: миграция 003 (деньги в minor) и корректный SQL-парсер.
+# Старый split(";") резал скрипт по точке с запятой внутри комментария
+# ("...1 копейка; 1 234,56 руб..."), из-за чего новая БД не могла пройти
+# миграции, а старая — обновиться до версии 3.
+# ---------------------------------------------------------------------------
+
+MIGDIR = Path(__file__).resolve().parent.parent / "migrations"
+
+
+def _schema_v2(conn):
+    """Воспроизводит схему версии 2 без minor-колонок."""
+    conn.executescript((MIGDIR / "001_init.sql").read_text(encoding="utf-8"))
+    conn.executescript((MIGDIR / "002_add_limits.sql").read_text(encoding="utf-8"))
+    conn.execute("INSERT INTO app_settings(key,value) VALUES('db_version','2')")
+    conn.commit()
+
+
+class TestSqlSplitter:
+    def test_semicolon_in_comment_does_not_split(self):
+        from app.services.migrations import split_sql_statements
+        sql = (MIGDIR / "003_money_minor.sql").read_text(encoding="utf-8")
+        stmts = split_sql_statements(sql)
+        assert len(stmts) == 4
+        for s in stmts:
+            assert not s.lstrip().startswith("--")
+            assert ";" not in s or s.startswith("INSERT")
+
+    def test_semicolon_in_string_literal_preserved(self):
+        from app.services.migrations import split_sql_statements
+        stmts = split_sql_statements("INSERT INTO t(a) VALUES ('x;y');")
+        assert stmts == ["INSERT INTO t(a) VALUES ('x;y')"]
+
+    def test_block_comment_with_semicolon_skipped(self):
+        from app.services.migrations import split_sql_statements
+        assert split_sql_statements("/* a; b */ SELECT 1;") == ["SELECT 1"]
+
+
+class TestMigration003MoneyMinor:
+    def test_clean_db_passes_1_to_3(self, tmp_path):
+        db = Database(tmp_path / "kaznachei.db")
+        applied = run_migrations(db, MIGDIR, tmp_path / "backups")
+        assert applied == [1, 2, 3]
+        cols_t = {r[1] for r in db.connection.execute("PRAGMA table_info(transactions)")}
+        cols_c = {r[1] for r in db.connection.execute("PRAGMA table_info(categories)")}
+        assert "amount_minor" in cols_t
+        assert "monthly_limit_minor" in cols_c
+
+    def test_upgrade_from_v2_exact_copecity(self, tmp_path):
+        """Суммы 0.01, 10.10, 999999.99 конвертируются точно; шаблоны мигрируются;
+        количество операций/категорий и id сохраняются."""
+        db = Database(tmp_path / "kaznachei.db")
+        conn = db.connection
+        _schema_v2(conn)
+        conn.execute(
+            "INSERT INTO categories(name,type,is_active,monthly_limit,created_at)"
+            " VALUES ('Продукты','expense',1,5000.55,'2026-01-01')")
+        cat_id = conn.execute("SELECT id FROM categories").fetchone()[0]
+        rows = [(0.01, 0), (10.10, 0), (999999.99, 0), (55.5, 1)]
+        for amt, tpl in rows:
+            conn.execute(
+                "INSERT INTO transactions(type,amount,category_id,date,description,"
+                "currency,is_template,created_at)"
+                " VALUES('expense',?,?,'2026-01-02','т','RUB',?,'2026-01-02')",
+                (amt, cat_id, tpl))
+        conn.commit()
+        total_before = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
+        cats_before = conn.execute("SELECT COUNT(*) FROM categories").fetchone()[0]
+        expect = {r[0]: int(round(r[1] * 100))
+                  for r in conn.execute("SELECT id, amount FROM transactions")}
+        conn.close()
+        db._conn = None
+
+        applied = run_migrations(db, MIGDIR, tmp_path / "backups")
+        assert applied == [3]
+        conn = db.connection
+        assert conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0] == total_before
+        assert conn.execute("SELECT COUNT(*) FROM categories").fetchone()[0] == cats_before
+        got = dict(conn.execute("SELECT id, amount_minor FROM transactions"))
+        assert got == expect
+        assert conn.execute(
+            "SELECT monthly_limit_minor FROM categories").fetchone()[0] == 500055
+        # шаблон мигрирован так же, как обычная операция
+        assert conn.execute(
+            "SELECT amount_minor FROM transactions WHERE is_template=1").fetchone()[0] == 5550
+
+    def test_rerun_is_idempotent(self, tmp_path):
+        db = Database(tmp_path / "kaznachei.db")
+        run_migrations(db, MIGDIR, tmp_path / "backups")
+        before = list(db.connection.execute(
+            "SELECT id, amount_minor FROM transactions ORDER BY id"))
+        assert run_migrations(db, MIGDIR, tmp_path / "backups") == []
+        after = list(db.connection.execute(
+            "SELECT id, amount_minor FROM transactions ORDER BY id"))
+        assert before == after
+        cols = [r[1] for r in db.connection.execute("PRAGMA table_info(transactions)")]
+        assert cols.count("amount_minor") == 1
+
+    def test_error_inside_003_rolls_back_columns(self, tmp_path):
+        """После ошибки в 003 не должно оставаться колонок amount_minor и
+        monthly_limit_minor; версия остаётся 2, данные целы."""
+        db = Database(tmp_path / "kaznachei.db")
+        conn = db.connection
+        _schema_v2(conn)
+        conn.execute(
+            "INSERT INTO categories(name,type,is_active,monthly_limit,created_at)"
+            " VALUES ('Тест','expense',1,10,'2026-01-01')")
+        conn.execute(
+            "INSERT INTO transactions(type,amount,category_id,date,currency,"
+            "is_template,created_at) VALUES ('expense',7.77,1,'2026-01-02','RUB',0,'2026-01-02')")
+        conn.commit()
+        conn.close()
+        db._conn = None
+
+        bad = tmp_path / "migrations_bad"
+        bad.mkdir()
+        for f in ("001_init.sql", "002_add_limits.sql"):
+            (bad / f).write_text((MIGDIR / f).read_text(encoding="utf-8"), encoding="utf-8")
+        (bad / "003_money_minor.sql").write_text(
+            "ALTER TABLE transactions ADD COLUMN amount_minor INTEGER NOT NULL DEFAULT 0;\n"
+            "UPDATE transactions SET amount_minor = CAST(ROUND(amount * 100) AS INTEGER);\n"
+            "ALTER TABLE categories ADD COLUMN monthly_limit_minor INTEGER NOT NULL DEFAULT 0;\n"
+            "SELECT * FROM no_such_table_zzz;\n", encoding="utf-8")
+
+        with pytest.raises(MigrationError):
+            run_migrations(db, bad, tmp_path / "backups")
+
+        conn = db.connection
+        cols_t = {r[1] for r in conn.execute("PRAGMA table_info(transactions)")}
+        cols_c = {r[1] for r in conn.execute("PRAGMA table_info(categories)")}
+        assert "amount_minor" not in cols_t
+        assert "monthly_limit_minor" not in cols_c
+        assert conn.execute(
+            "SELECT value FROM app_settings WHERE key='db_version'").fetchone()[0] == "2"
+        assert conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0] == 1

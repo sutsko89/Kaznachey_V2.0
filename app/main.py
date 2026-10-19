@@ -30,8 +30,12 @@ def bootstrap(db_path=None):
 
     rc == 0 — payload это (app, window, lock); иначе payload — текст ошибки.
     Lock возвращается вызывающему коду и хранится в памяти до полного завершения.
+
+    Если QApplication уже существует (тесты, повторный вызов), он переиспользуется:
+    создание второго экземпляра QApplication в том же процессе недопустимо и
+    приводит к аварийному завершению.
     """
-    app = QApplication(sys.argv)
+    app = QApplication.instance() or QApplication(sys.argv)
     apply_light_theme(app)
 
     path = default_db_path() if db_path is None else db_path
@@ -72,13 +76,19 @@ def db_backup_dir(db: Database):
     return Path(db.path).parent / "backups"
 
 
+# FR-08: отдельный код завершения второго экземпляра (тот же lock уже занят).
+EXIT_ALREADY_RUNNING = 3
+
+
 def main() -> int:
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
     db_path = args[0] if args else None
     rc, payload = bootstrap(db_path)
     if rc != 0:
         _critical("Казначей", payload)
-        return rc if rc != 2 else 3
+        # Второй экземпляр той же БД — отдельный exit code (FR-08),
+        # завершается немедленно, без ожидания блокировки.
+        return EXIT_ALREADY_RUNNING if rc == 2 else rc
     app, window, lock = payload
     try:
         code = app.exec()

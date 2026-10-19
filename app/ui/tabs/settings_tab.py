@@ -28,15 +28,10 @@ class SettingsTab(QWidget):
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(10)
 
-        # ---------- Данные и отображение ----------
+        # ---------- Данные и отображение (FR-18/19: только рабочие настройки) ----------
         data_group = QGroupBox("Данные и отображение")
         form = QFormLayout(data_group)
         layout.addWidget(data_group)
-
-        self.base_currency_combo = QComboBox()
-        self.base_currency_combo.setEditable(True)
-        self.base_currency_combo.addItems(["RUB", "USD", "EUR"])
-        form.addRow("Базовая валюта:", self.base_currency_combo)
 
         db_path_row = QHBoxLayout()
         self.db_path_label = QLineEdit(str(service.db.path))
@@ -44,23 +39,9 @@ class SettingsTab(QWidget):
         db_path_row.addWidget(self.db_path_label)
         form.addRow("Путь к БД:", db_path_row)
 
-        self.date_format_combo = QComboBox()
-        self.date_format_combo.addItems(["DD.MM.YYYY", "YYYY-MM-DD"])
-        form.addRow("Формат даты:", self.date_format_combo)
-
-        self.number_format_combo = QComboBox()
-        self.number_format_combo.addItems(["12 345,67 (русский)"])
-        form.addRow("Формат чисел:", self.number_format_combo)
-
         self.scale_combo = QComboBox()
         self.scale_combo.addItems(["100%", "125%", "150%"])
         form.addRow("Масштаб интерфейса:", self.scale_combo)
-
-        # тема единственная — светлая; выбор тёмной удалён из UI.
-        # theme_combo оставлен как read-only индикатор для обратной совместимости тестов.
-        self.theme_combo = QComboBox()
-        self.theme_combo.addItems(["Светлая"])
-        form.addRow("Тема интерфейса:", self.theme_combo)
 
         self.page_size_combo = QComboBox()
         self.page_size_combo.addItems(["25", "50"])
@@ -113,16 +94,10 @@ class SettingsTab(QWidget):
     # ---------- значения ----------
     def load_values(self) -> None:
         s = self.service
-        self.base_currency_combo.setCurrentText(s.get_setting("base_currency", "RUB"))
-        idx = self.date_format_combo.findText(s.get_setting("date_format", "DD.MM.YYYY"))
-        if idx >= 0:
-            self.date_format_combo.setCurrentIndex(idx)
         scale = s.get_setting("ui_scale", "100")
         idx = self.scale_combo.findText(f"{scale}%")
         if idx >= 0:
             self.scale_combo.setCurrentIndex(idx)
-        # светлая — единственная тема
-        self.theme_combo.setCurrentIndex(0)
         ps = s.get_setting("page_size", "50")
         idx = self.page_size_combo.findText(ps)
         if idx >= 0:
@@ -133,11 +108,8 @@ class SettingsTab(QWidget):
     def _save_settings(self) -> None:
         try:
             s = self.service
-            s.set_setting("base_currency", self.base_currency_combo.currentText().strip().upper())
-            s.set_setting("date_format", self.date_format_combo.currentText())
-            s.set_setting("number_format", "ru")
+            # FR-19: пользователь может изменять только ui_scale, page_size, backup_path
             s.set_setting("ui_scale", self.scale_combo.currentText().rstrip("%"))
-            s.set_setting("theme", "light")  # светлая тема — единственная
             s.set_setting("page_size", self.page_size_combo.currentText())
             raw = self.backup_dir_edit.text().strip()
             s.set_setting("backup_path", str(Path(raw).expanduser()) if raw else "")
@@ -146,10 +118,7 @@ class SettingsTab(QWidget):
             return
         if self.on_saved is not None:
             self.on_saved()
-        QMessageBox.information(
-            self, "Казначей",
-            "Настройки сохранены. Масштаб применён сразу (тема — светлая).",
-        )
+        QMessageBox.information(self, "Казначей", "Настройки сохранены.")
 
     # ---------- бэкапы ----------
     def backup_dir(self) -> Path:

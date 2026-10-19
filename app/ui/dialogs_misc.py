@@ -4,12 +4,13 @@ from __future__ import annotations
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QDialog, QDialogButtonBox, QComboBox, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QMessageBox, QVBoxLayout, QFormLayout, QDoubleSpinBox,
+    QListWidgetItem, QMessageBox, QVBoxLayout, QFormLayout,
 )
 
 from app.dal.database import Category, Transaction
-from app.domain.service import TreasuryService
+from app.domain.service import TreasuryService, format_amount_ru
 from app.errors import DatabaseError, ValidationError
+from app.ui.moneyedit import MoneyEdit
 
 
 class CategoryDialog(QDialog):
@@ -46,12 +47,10 @@ class CategoryDialog(QDialog):
                 form.addRow(QLabel("Тип нельзя изменить: по категории есть операции"))
         form.addRow("Тип:", self.type_combo)
 
-        self.limit_spin = QDoubleSpinBox()
-        self.limit_spin.setRange(0.0, 1_000_000_000)
-        self.limit_spin.setDecimals(2)
+        self.limit_edit = MoneyEdit(placeholder="0 = без лимита")
         if category:
-            self.limit_spin.setValue(category.monthly_limit)
-        form.addRow("Месячный лимит:", self.limit_spin)
+            self.limit_edit.set_minor(category.monthly_limit_minor)
+        form.addRow("Месячный лимит, руб.:", self.limit_edit)
         form.addRow(QLabel("0 = без лимита. Для доходных категорий лимит не применяется."))
 
         self.error_label = QLabel("")
@@ -72,12 +71,24 @@ class CategoryDialog(QDialog):
         self.error_label.hide()
         name = self.name_edit.text().strip()
         type_ = self.type_combo.currentData()
-        limit = self.limit_spin.value()
+        # MoneyEdit: строка -> minor units через Decimal (FR-10, без float)
+        try:
+            limit_minor = self.limit_edit.parse_minor()
+        except ValidationError as exc:
+            self.error_label.setText(exc.errors.get("amount", "Некорректное значение лимита"))
+            self.error_label.show()
+            return
+        error = MoneyEdit.validate_minor(limit_minor, allow_zero=True)
+        if error is not None:
+            self.error_label.setText(error if "Лимит" in error else
+                                     ("Лимит не может быть отрицательным" if limit_minor < 0 else error))
+            self.error_label.show()
+            return
         try:
             if self.category is not None and self.category.id is not None:
-                cat = self.service.update_category(self.category.id, name, type_, limit)
+                cat = self.service.update_category(self.category.id, name, type_, limit_minor)
             else:
-                cat = self.service.add_category(name, type_, limit)
+                cat = self.service.add_category(name, type_, limit_minor)
             self.saved = cat
             self.accept()
         except ValidationError as exc:

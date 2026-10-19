@@ -1,24 +1,27 @@
-"""Диалог добавления/редактирования операции (и создания шаблона)."""
+"""Диалог добавления/редактирования операции (и создания шаблона).
+
+Этап 1: денежный ввод — QLineEdit + Decimal-разбор в копеечные minor units
+(без float и без QDoubleSpinBox), выбор валюты удалён (FR-13), дата — через
+QDateEdit с календарём в единственном формате DD.MM.YYYY (FR-04/05).
+"""
 from __future__ import annotations
 
-import datetime as dt
-
-from PyQt6.QtCore import QDate, Qt
+from PyQt6.QtCore import QDate
 from PyQt6.QtWidgets import (
-    QDialog, QDialogButtonBox, QComboBox, QDateEdit, QDoubleSpinBox,
-    QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QVBoxLayout,
+    QDialog, QDialogButtonBox, QComboBox, QDateEdit,
+    QFormLayout, QLabel, QLineEdit, QMessageBox, QVBoxLayout,
 )
 
 from app.dal.database import Category, Transaction
-from app.domain.service import TreasuryService, format_amount_ru
+from app.domain.service import TreasuryService
 from app.errors import DatabaseError, ValidationError
+from app.ui.moneyedit import MoneyEdit
 
-CURRENCIES = ["RUB", "USD", "EUR"]
 TYPE_INCOME, TYPE_EXPENSE = "income", "expense"
 
 
 class TransactionDialog(QDialog):
-    """Поля: тип, категория, сумма, дата, валюта, комментарий + чекбокс «Сохранить как шаблон»."""
+    """Поля: тип, категория, сумма, дата, комментарий + чекбокс «Сохранить как шаблон»."""
 
     def __init__(self, service: TreasuryService, parent=None, *,
                  transaction: Transaction | None = None,
@@ -51,14 +54,11 @@ class TransactionDialog(QDialog):
         self.category_combo = QComboBox()
         form.addRow("Категория:", self.category_combo)
 
-        # сумма
-        self.amount_spin = QDoubleSpinBox()
-        self.amount_spin.setRange(0.0, 1_000_000_000)
-        self.amount_spin.setDecimals(2)
-        self.amount_spin.setGroupSeparatorShown(True)
-        form.addRow("Сумма:", self.amount_spin)
+        # сумма: MoneyEdit (QLineEdit + Decimal-разбор в minor units, FR-10)
+        self.amount_edit = MoneyEdit()
+        form.addRow("Сумма, руб.:", self.amount_edit)
 
-        hint = QLabel("Укажите сумму в базовой валюте. Валюта сохраняется как метка операции.")
+        hint = QLabel("Приложение работает только в рублях. Сумма вводится с точностью до копеек.")
         hint.setWordWrap(True)
         hint.setStyleSheet("color: gray; font-size: 9pt;")
         form.addRow(hint)
@@ -67,19 +67,8 @@ class TransactionDialog(QDialog):
         self.date_edit = QDateEdit(QDate.currentDate())
         self.date_edit.setCalendarPopup(True)
         self.date_edit.setDisplayFormat("dd.MM.yyyy")
+        self.date_edit.setMinimumHeight(34)
         form.addRow("Дата:", self.date_edit)
-
-        # валюта
-        currency_row = QHBoxLayout()
-        self.currency_combo = QComboBox()
-        self.currency_combo.setEditable(True)
-        self.currency_combo.addItems(CURRENCIES)
-        self.base_currency = service.get_setting("base_currency", "RUB") or "RUB"
-        if self.base_currency not in CURRENCIES:
-            self.currency_combo.addItem(self.base_currency)
-        currency_row.addWidget(self.currency_combo)
-        currency_row.addWidget(QLabel(f"(базовая: {self.base_currency})"))
-        form.addRow("Валюта:", currency_row)
 
         # комментарий
         self.description_edit = QLineEdit()
@@ -87,7 +76,7 @@ class TransactionDialog(QDialog):
 
         # компактные ошибки рядом с полями
         self.error_labels: dict[str, QLabel] = {}
-        for key in ("type", "category_id", "amount", "date", "currency"):
+        for key in ("type", "category_id", "amount", "date"):
             lbl = QLabel("")
             lbl.setStyleSheet("color: red; font-size: 8pt;")
             lbl.hide()
@@ -124,12 +113,11 @@ class TransactionDialog(QDialog):
             cidx = self.category_combo.findData(src.category_id)
             if cidx >= 0:
                 self.category_combo.setCurrentIndex(cidx)
-            self.amount_spin.setValue(src.amount)
+            self.amount_edit.set_minor(src.amount_minor)
             self.date_edit.setDate(QDate.fromString(src.date, "yyyy-MM-dd"))
             if template_prefill is not None:
                 # при использовании шаблона дата — сегодняшняя
                 self.date_edit.setDate(QDate.currentDate())
-            self.currency_combo.setCurrentText(src.currency)
             self.description_edit.setText(src.description)
             if transaction is not None:
                 self.template_check_enabled(False)
@@ -173,13 +161,22 @@ class TransactionDialog(QDialog):
     def _on_accept(self) -> None:
         self._clear_errors()
         category_id = self.category_combo.currentData()
+        # MoneyEdit: строка -> minor units через Decimal (FR-10, без float)
+        try:
+            amount_minor = self.amount_edit.parse_minor()
+        except ValidationError as exc:
+            self._show_error("amount", exc.errors.get("amount", "Некорректная сумма"))
+            return
+        error = MoneyEdit.validate_minor(amount_minor, allow_zero=False)
+        if error is not None:
+            self._show_error("amount", error)
+            return
         fields = dict(
             type_=self.type_combo.currentData(),
-            amount=self.amount_spin.value(),
+            amount_minor=amount_minor,
             category_id=category_id if category_id is not None else 0,
             date=self.date_edit.date().toString("yyyy-MM-dd"),
             description=self.description_edit.text(),
-            currency=self.currency_combo.currentText(),
         )
         try:
             if category_id is None:

@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
 )
 
 from app.dal.database import Database, Transaction
+from app.domain.validators import parse_amount_minor
 from app.domain.service import TreasuryService
 from app.errors import DatabaseError, ValidationError
 from app.services.export import export_transactions_csv
@@ -206,9 +207,9 @@ class MainWindow(QMainWindow):
                                               "CSV файлы (*.csv)")
         if not dest:
             return
-        filters = self.transactions_tab.current_filters()
+        f = self.transactions_tab.current_filter()
         try:
-            count = export_transactions_csv(self.db, dest, **filters)
+            count = export_transactions_csv(self.db, dest, f)
         except (DatabaseError, OSError) as exc:
             QMessageBox.critical(self, "Казначей", f"Не удалось выполнить экспорт: {exc}")
             return
@@ -235,12 +236,20 @@ class TemplateEditDialog(TransactionDialog):
     def _on_accept(self) -> None:
         self._clear_errors()
         category_id = self.category_combo.currentData()
+        # строковый ввод суммы -> minor units через Decimal (FR-10, без float)
+        try:
+            amount_minor = parse_amount_minor(self.amount_edit.text())
+        except ValidationError as exc:
+            self._show_error("amount", exc.errors.get("amount", "Некорректная сумма"))
+            return
+        if amount_minor <= 0:
+            self._show_error("amount", "Сумма должна быть больше нуля")
+            return
         fields = dict(
             type_=self.type_combo.currentData(),
-            amount=self.amount_spin.value(),
+            amount_minor=amount_minor,
             category_id=category_id if category_id is not None else 0,
             description=self.description_edit.text(),
-            currency=self.currency_combo.currentText(),
         )
         try:
             if category_id is None:

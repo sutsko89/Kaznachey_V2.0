@@ -64,7 +64,7 @@ class TemplatesTab(QWidget):
             cells = [
                 tpl.category_name,
                 "Доход" if tpl.type == "income" else "Расход",
-                format_amount_ru(tpl.amount),
+                format_amount_ru(tpl.amount_minor),
                 tpl.description,
             ]
             for j, text in enumerate(cells):

@@ -59,13 +59,17 @@ class InstanceLock:
     def try_lock(self) -> bool:
         path = lock_dir() / f"{self.key}.lock"
         qlock = QLockFile(str(path))
+        # setStaleLockTime(0): долгоживущая блокировка; QLockFile сам удаляет
+        # устаревший lock, если PID владельца процесса не существует
+        # (аварийное завершение).
         qlock.setStaleLockTime(STALE_AFTER_MS)
-        # tryLock(-1): попытка однократная; устаревший lock (мёртвый PID)
-        # QLockFile удаляет сам.
-        if qlock.tryLock(-1):
+        # tryLock(0): ОДНОКРАТНАЯ попытка без ожидания. Отрицательный timeout
+        # в Qt означает бесконечное ожидание — второй экземпляр завис бы,
+        # вместо немедленного отказа. При отказе сразу возвращаем False,
+        # вызывающий код показывает сообщение и завершает процесс.
+        if qlock.tryLock(0):
             self._file = qlock
             return True
-        qlock.close() if hasattr(qlock, "close") else None
         return False
 
     def is_locked_by_me(self) -> bool:
