@@ -49,8 +49,12 @@ class TemplatesTab(QWidget):
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setDefaultSectionSize(32)
         self.table.doubleClicked.connect(lambda *_: self._edit_selected())
+        # FR-14/15: кнопки активны только после явного клика пользователя по строке
+        self.table.itemSelectionChanged.connect(self._update_buttons)
         layout.addWidget(self.table, stretch=1)
 
+        self.btn_edit.setEnabled(False)
+        self.btn_delete.setEnabled(False)
         self.refresh()
 
     def refresh(self) -> None:
@@ -73,31 +77,42 @@ class TemplatesTab(QWidget):
                     item.setTextAlignment(
                         Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 self.table.setItem(i, j, item)
+        # FR-14: setRowCount снимает выделение — кнопки должны стать disabled
+        self._update_buttons()
 
-    def _selected_template(self) -> Transaction | None:
+    def _update_buttons(self) -> None:
+        """FR-14/15: destructive-кнопки disabled без явного выбора строки."""
+        has_sel = self._selected_row() is not None
+        self.btn_edit.setEnabled(has_sel)
+        self.btn_delete.setEnabled(has_sel)
+
+    def _selected_row(self) -> int | None:
+        """Индекс явно выбранной строки или None. Автовыбор запрещён."""
+        if not self.table.selectionModel().hasSelection():
+            return None
         row = self.table.currentRow()
         if 0 <= row < len(self.rows_cache):
-            return self.rows_cache[row]
-        QMessageBox.information(self, "Казначей", "Сначала выберите шаблон.")
+            return row
         return None
 
-    def _edit_selected(self) -> None:
-        tpl = None
-        row = self.table.currentRow()
-        if 0 <= row < len(self.rows_cache):
-            tpl = self.rows_cache[row]
-        else:
+    def _selected_template(self) -> Transaction | None:
+        row = self._selected_row()
+        if row is None:
             QMessageBox.information(self, "Казначей", "Сначала выберите шаблон.")
+            return None
+        return self.rows_cache[row]
+
+    def _edit_selected(self) -> None:
+        tpl = self._selected_template()
+        if tpl is None:
             return
         if self.on_edit_template:
             self.on_edit_template(tpl)
 
     def _delete_selected(self) -> None:
-        row = self.table.currentRow()
-        if not (0 <= row < len(self.rows_cache)):
-            QMessageBox.information(self, "Казначей", "Сначала выберите шаблон.")
+        tpl = self._selected_template()
+        if tpl is None:
             return
-        tpl = self.rows_cache[row]
         answer = QMessageBox.question(
             self, "Подтверждение удаления",
             self.service.confirm_text_for_delete_template(tpl),

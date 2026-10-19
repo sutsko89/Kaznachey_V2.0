@@ -305,6 +305,9 @@ class TransactionsTab(QWidget):
 
     # ---------- действия ----------
     def current_transaction(self) -> Transaction | None:
+        """Только явно выбранная пользователем строка; автовыбор запрещён (FR-14)."""
+        if not self.table.selectionModel().hasSelection():
+            return None
         row = self.table.currentRow()
         if 0 <= row < len(self.rows_cache):
             return self.rows_cache[row]

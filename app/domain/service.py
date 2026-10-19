@@ -379,8 +379,12 @@ class TreasuryService:
             if r["type"] == "expense" and r["monthly_limit_minor"] > 0:
                 spent = spent_map.get(r["category_id"], r["total_minor"])
                 remaining = r["monthly_limit_minor"] - spent   # целые minor
-            out.append({**r, "share_percent": share, "remaining_limit_minor": remaining,
-                    "total": r["total_minor"], "monthly_limit": r["monthly_limit_minor"]})
+            out.append({**r, "share_percent": share,
+                        "remaining_limit_minor": remaining,
+                        # алиасы *_minor — канонические имена; короткие — для UI
+                        "spent": r["total_minor"], "limit": r["monthly_limit_minor"],
+                        "remaining_limit": remaining,
+                        "total": r["total_minor"], "monthly_limit": r["monthly_limit_minor"]})
         return out
 
 

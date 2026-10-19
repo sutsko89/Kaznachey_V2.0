@@ -82,6 +82,8 @@ class SettingsTab(QWidget):
         bform.addRow(btns)
 
         self.backups_list = QListWidget()
+        # FR-14/15: восстановление доступно только после явного выбора бэкапа
+        self.backups_list.itemSelectionChanged.connect(self._update_restore_button)
         bform.addRow(self.backups_list)
 
         self.btn_create_backup.clicked.connect(self.create_backup)
@@ -90,6 +92,10 @@ class SettingsTab(QWidget):
 
         layout.addStretch(1)
         self.load_values()
+
+    def _update_restore_button(self) -> None:
+        """FR-15: destructive-кнопка disabled, пока объект явно не выбран."""
+        self.btn_restore.setEnabled(bool(self.backups_list.selectedItems()))
 
     # ---------- значения ----------
     def load_values(self) -> None:
@@ -142,6 +148,8 @@ class SettingsTab(QWidget):
             item = QListWidgetItem(p.name)
             item.setData(Qt.ItemDataRole.UserRole, str(p))
             self.backups_list.addItem(item)
+        # FR-14: после обновления списка выбор очищен — кнопка disabled
+        self._update_restore_button()
 
     def create_backup(self) -> bool:
         """Публичный метод: Ctrl+B вызывает его. Возвращает успех."""
@@ -163,10 +171,11 @@ class SettingsTab(QWidget):
 
     def restore_selected_backup(self) -> bool:
         """Откат только вручную и только с подтверждением. Возвращает успех."""
-        item = self.backups_list.currentItem()
-        if item is None:
+        items = self.backups_list.selectedItems()  # только явный выбор пользователя
+        if not items:
             QMessageBox.information(self, "Казначей", "Выберите бэкап из списка.")
             return False
+        item = items[0]
         backup_path = Path(item.data(Qt.ItemDataRole.UserRole))
         answer = QMessageBox.question(
             self, "Подтверждение восстановления",
