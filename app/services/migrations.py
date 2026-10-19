@@ -63,18 +63,29 @@ def load_migrations(migrations_dir: str | Path) -> list[tuple[int, Path]]:
     return result
 
 
-def get_current_version(db_path: str | Path) -> int:
-    """Текущая версия схемы БД (0, если таблицы настроек ещё нет)."""
-    conn = sqlite3.connect(str(db_path))
+def get_current_version(db_or_path) -> int:
+    """Текущая версия схемы БД (0, если таблицы schema_version ещё нет).
+
+    Принимает Database, sqlite3.Connection или путь к файлу БД.
+    Источник истины — таблица schema_version (ТЗ 6.1); app_settings.db_version
+    является зеркалом для совместимости.
+    """
+    conn = None
+    own_conn = False
     try:
-        row = conn.execute(
-            "SELECT value FROM app_settings WHERE key='db_version'"
-        ).fetchone()
-        return int(row[0]) if row else 0
+        if hasattr(db_or_path, "connection"):          # Database
+            conn = db_or_path.connection
+        elif hasattr(db_or_path, "execute"):           # sqlite3.Connection
+            conn = db_or_path
+        else:                                          # path
+            conn = sqlite3.connect(str(db_or_path))
+            own_conn = True
+        return _max_version(conn)
     except sqlite3.Error:
         return 0
     finally:
-        conn.close()
+        if own_conn and conn is not None:
+            conn.close()
 
 
 def run_migrations(db, migrations_dir: str | Path, backup_dir: str | Path) -> list[int]:

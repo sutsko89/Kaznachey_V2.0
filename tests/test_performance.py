@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from app.dal.database import Category, Database, Transaction
+from app.dal.database import Category, Database, Transaction, TransactionFilter
 from app.services.migrations import run_migrations
 
 TX_COUNT = 10_000
@@ -95,7 +95,7 @@ def test_startup_under_budget(tmp_path):
 
 
 def test_search_fast(big_db: Database):
-    (rows, total), elapsed = _timed(lambda: big_db.list_transactions(search="ТАКСИ"))
+    (rows, total), elapsed = _timed(lambda: big_db.list_transactions(TransactionFilter(search="ТАКСИ")))
     _append(f"Поиск подстроки по {TX_COUNT} записей: {elapsed:.3f} с")
     assert total > 0
     assert elapsed < SEARCH_BUDGET_S
@@ -103,23 +103,23 @@ def test_search_fast(big_db: Database):
 
 def test_search_mixed_case_cyrillic(big_db: Database):
     """Регистронезависимость кириллицы в поиске на стороне SQL (ТЗ 9.5)."""
-    _, t_upper = big_db.list_transactions(search="ТАКСИ")
-    _, t_mixed = big_db.list_transactions(search="ТакСИ")
-    _, t_lower = big_db.list_transactions(search="такси")
+    _, t_upper = big_db.list_transactions(TransactionFilter(search="ТАКСИ"))
+    _, t_mixed = big_db.list_transactions(TransactionFilter(search="ТакСИ"))
+    _, t_lower = big_db.list_transactions(TransactionFilter(search="такси"))
     assert t_upper == t_mixed == t_lower > 0
 
 
 def test_search_cyrillic_by_category(big_db: Database):
-    _, elapsed = _timed(lambda: big_db.list_transactions(search="категория 07"))
+    _, elapsed = _timed(lambda: big_db.list_transactions(TransactionFilter(search="категория 07")))
     _append(f"Поиск по имени категории (кириллица): {elapsed:.3f} с")
     assert elapsed < SEARCH_BUDGET_S
 
 
 def test_filter_combined(big_db: Database):
     def filtered():
-        return big_db.list_transactions(
-            date_from="2025-06-01", date_to="2026-06-01",
-            tx_type="expense", limit=50, offset=0)
+        f = TransactionFilter(date_from="2025-06-01", date_to="2026-06-01",
+                              tx_type="expense")
+        return big_db.list_transactions(f, limit=50, offset=0)
 
     (rows, total), elapsed = _timed(filtered)
     _append(f"Комбинированный фильтр + пагинация: {elapsed:.3f} с")
@@ -130,8 +130,9 @@ def test_filter_combined(big_db: Database):
 
 def test_table_refresh_page(big_db: Database):
     def page():
-        return big_db.list_transactions(order_by="date DESC, id DESC",
-                                       limit=50, offset=100)
+        return big_db.list_transactions(TransactionFilter(),
+                                        order_by="date DESC, id DESC",
+                                        limit=50, offset=100)
 
     (rows, _), elapsed = _timed(page)
     _append(f"Обновление таблицы (страница 50 строк): {elapsed:.3f} с")

@@ -11,7 +11,9 @@ from __future__ import annotations
 import datetime as dt
 
 from PyQt6.QtCore import QDate, Qt
-from PyQt6.QtWidgets import QCheckBox, QDateEdit, QHBoxLayout, QWidget
+from PyQt6.QtWidgets import (
+    QCheckBox, QDateEdit, QHBoxLayout, QLineEdit, QPushButton, QWidget,
+)
 
 DB_FORMAT = "yyyy-MM-dd"      # формат хранения в SQLite
 UI_FORMAT = "dd.MM.yyyy"      # единственный отображаемый формат
@@ -47,6 +49,114 @@ def validate_range(date_from: str | None, date_to: str | None) -> str | None:
     return None
 
 
+class DateError(Exception):
+    """Некорректно введённая дата: молчаливо превращать её в отсутствие
+    фильтра запрещено (FR-06)."""
+
+
+class DateLineEdit(QWidget):
+    """Редактируемое поле даты DD.MM.YYYY с календарём (popup по кнопке).
+
+    В отличие от NullableDateEdit пользователь может ввести дату с клавиатуры;
+    некорректный ввод НЕ трактуется как «дата не задана»: editingFinished
+    валидирует содержимое, подсвечивает поле красным и выбрасывает DateError.
+    value() для корректного значения возвращает ISO YYYY-MM-DD,
+    для пустого — None.
+    """
+
+    ERROR_STYLE = ("border: 1px solid #b3261e; background: #fdecea;")
+
+    def __init__(self, parent=None, initial_iso: str | None = None):
+        super().__init__(parent)
+        self.line = QLineEdit()
+        self.line.setPlaceholderText("ДД.ММ.ГГГГ")
+        self.line.setMinimumHeight(34)
+        self.btn_calendar = QPushButton("🗹")
+        self.btn_calendar.setObjectName("iconButton")
+        self.btn_calendar.setFixedWidth(38)
+        self.btn_calendar.setMinimumHeight(34)
+        self.btn_calendar.setToolTip("Открыть календарь")
+        self.date_edit = QDateEdit(QDate.currentDate())
+        self.date_edit.setCalendarPopup(True)
+        self.date_edit.setDisplayFormat(UI_FORMAT)
+        self.date_edit.setVisible(False)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+        lay.addWidget(self.line, stretch=1)
+        lay.addWidget(self.btn_calendar)
+        self.btn_calendar.clicked.connect(self._open_calendar)
+        self.date_edit.dateChanged.connect(self._on_calendar_date)
+        self.line.editingFinished.connect(self._validate_interactive)
+        if initial_iso is not None:
+            self.set_value(initial_iso)
+
+    # ---------- API ----------
+    def value(self) -> str:
+        """ISO YYYY-MM-DD; при некорректном вводе — DateError (не ''!)."""
+        text = self.line.text().strip()
+        if text == "":
+            raise DateError("Дата не указана.")
+        try:
+            return from_display(text)
+        except ValueError:
+            raise DateError(f"Некорректная дата «{text}». Формат: ДД.ММ.ГГГГ.")
+
+    def value_or_none(self) -> str | None:
+        try:
+            return self.value()
+        except DateError:
+            return None
+
+    def set_value(self, iso: str | None) -> None:
+        self.line.setText(to_display(iso) if iso else "")
+        self._set_error(False)
+
+    def has_text(self) -> bool:
+        return self.line.text().strip() != ""
+
+    def focus_line(self) -> QLineEdit:
+        return self.line
+
+    # ---------- внутреннее ----------
+    def _open_calendar(self) -> None:
+        try:
+            current = self.value()
+            self.date_edit.setDate(iso_to_qdate(current))
+        except DateError:
+            self.date_edit.setDate(QDate.currentDate())
+        # показать popup через временное позиционирование невидимого QDateEdit
+        geo = self.btn_calendar.geometry()
+        self.date_edit.setGeometry(self.btn_calendar.mapToParent(geo.topLeft()).x(),
+                                   geo.bottom() + 2, 220, 24)
+        self.date_edit.setVisible(True)
+        self.date_edit.showPopup()
+
+    def _on_calendar_date(self, qd: QDate) -> None:
+        self.line.setText(qd.toString(UI_FORMAT))
+        self._set_error(False)
+        self.date_edit.setVisible(False)
+        self._emit_finished()
+
+    def _validate_interactive(self) -> None:
+        ok = True
+        try:
+            self.value()
+        except DateError:
+            ok = False
+        self._set_error(not ok)
+        if ok:
+            self._emit_finished()
+
+    def _set_error(self, error: bool) -> None:
+        self.line.setStyleSheet(self.ERROR_STYLE if error else "")
+
+    def _emit_finished(self) -> None:
+        cb = getattr(self, "on_changed", None)
+        if callable(cb):
+            cb()
+
+
 class NullableDateEdit(QWidget):
     """QDateEdit с календарём и возможностью явно оставить поле пустым.
 
@@ -72,9 +182,22 @@ class NullableDateEdit(QWidget):
 
     # ---------- API ----------
     def value(self) -> str | None:
+        """ISO YYYY-MM-DD либо None (дата явно не задана).
+
+        Некорректно введённая с клавиатуры дата НЕ превращается молча в
+        отсутствие фильтра — выбрасывается DateError (FR-06).
+        """
         if not self._enabled_cb.isChecked():
             return None
-        return qdate_to_iso(self.date_edit.date())
+        text = self.date_edit.lineEdit().text().strip()
+        if QDate.fromString(text, UI_FORMAT).isValid():
+            return qdate_to_iso(self.date_edit.date())
+        raise DateError(f"Некорректная дата «{text}». Формат: ДД.ММ.ГГГГ.")
+
+    def set_error(self, error: bool) -> None:
+        """Подсветка поля при ошибке ввода даты."""
+        self.date_edit.setStyleSheet(
+            "border: 1px solid #b3261e; background: #fdecea;" if error else "")
 
     def set_value(self, iso: str | None) -> None:
         if iso is None or iso == "":
@@ -82,6 +205,7 @@ class NullableDateEdit(QWidget):
         else:
             self._enabled_cb.setChecked(True)
             self.date_edit.setDate(iso_to_qdate(iso))
+        self.set_error(False)
 
     def is_empty(self) -> bool:
         return not self._enabled_cb.isChecked()

@@ -17,8 +17,16 @@ from PyQt6.QtWidgets import (
 from app.dal.database import Transaction, TransactionFilter
 from app.domain.service import TreasuryService, format_amount_ru, to_display_date
 from app.errors import DatabaseError
-from app.ui.dateedit import NullableDateEdit, validate_range
+from app.ui.dateedit import DateError, NullableDateEdit, validate_range
 from app.ui.theme import EXPENSE_COLOR, INCOME_COLOR
+
+
+def _boundary_value(e: NullableDateEdit):
+    """Граница периода: None (не задана), str (ISO) или Exception (ошибка)."""
+    try:
+        return e.value()
+    except DateError as exc:
+        return exc
 
 
 class TransactionsTab(QWidget):
@@ -46,10 +54,13 @@ class TransactionsTab(QWidget):
         self.search_edit.textChanged.connect(self._on_filter_changed)
         top.addWidget(self.search_edit, stretch=2)
 
-        self.date_from_edit = NullableDateEdit(label="с")
+        # единый компонент даты (FR-05): QDateEdit + calendarPopup; пустая
+        # граница периода выражается снятием чекбокса (None), а не ''
+        self.date_from_edit = NullableDateEdit(label="период с")
         self.date_to_edit = NullableDateEdit(label="по")
         for e in (self.date_from_edit, self.date_to_edit):
             e.date_edit.dateChanged.connect(self._on_filter_changed)
+            e._enabled_cb.toggled.connect(self._on_filter_changed)
             top.addWidget(e)
 
         self.btn_reset_period = QPushButton("Сбросить период")
@@ -173,7 +184,22 @@ class TransactionsTab(QWidget):
         )
 
     def _period_error(self) -> str | None:
-        return validate_range(self.date_from_edit.value(), self.date_to_edit.value())
+        """Проверка границ периода ДО выполнения SQL (FR-06).
+
+        Некорректная дата не превращается молча в отсутствие фильтра:
+        поле подсвечивается, возвращается сообщение об ошибке.
+        """
+        v_from = _boundary_value(self.date_from_edit)
+        v_to = _boundary_value(self.date_to_edit)
+        if isinstance(v_from, DateError):
+            self.date_from_edit.set_error(True)
+            return str(v_from)
+        self.date_from_edit.set_error(False)
+        if isinstance(v_to, DateError):
+            self.date_to_edit.set_error(True)
+            return str(v_to)
+        self.date_to_edit.set_error(False)
+        return validate_range(v_from, v_to)
 
     def _reset_period(self) -> None:
         self.date_from_edit.clear()
@@ -181,6 +207,8 @@ class TransactionsTab(QWidget):
         self._on_filter_changed()
 
     def _on_filter_changed(self) -> None:
+        # FR-06: при ошибке периода таблица не обновляется; сообщение показывает
+        # refresh(). После исправления значения ошибка снимается автоматически.
         self.page = 0
         self.refresh()
 

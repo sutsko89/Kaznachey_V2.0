@@ -447,18 +447,18 @@ def format_amount_ru(minor: int) -> str:
     return f"{sign}{whole_str},{cents:02d}"
 
 
+# Единый модуль преобразования дат — app/ui/dateedit.py (FR-04): эти функции
+# являются тонкими делегатами к нему, дублирование логики запрещено.
 def to_display_date(iso_date: str) -> str:
     """YYYY-MM-DD -> DD.MM.YYYY (единственный формат дат в UI)."""
-    y, m, d = iso_date.split("-")
-    return f"{d}.{m}.{y}"
+    from app.ui.dateedit import to_display
+    return to_display(iso_date)
 
 
 def from_display_date(display: str) -> str:
     """DD.MM.YYYY -> YYYY-MM-DD; при ошибке — ValueError (без молчаливого '')."""
-    d, m, y = display.split(".")
-    iso = f"{y}-{m}-{d}"
-    validate_date(iso)
-    return iso
+    from app.ui.dateedit import from_display
+    return from_display(display)
 
 
 def _limit_to_minor(value) -> int:

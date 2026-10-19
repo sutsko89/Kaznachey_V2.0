@@ -13,7 +13,7 @@ from __future__ import annotations
 import calendar
 import datetime as dt
 
-from PyQt6.QtCore import QRectF, Qt
+from PyQt6.QtCore import QDate, QRectF, Qt
 from PyQt6.QtGui import QColor, QFont, QPainter
 from PyQt6.QtWidgets import (
     QAbstractItemView, QComboBox, QFrame, QHBoxLayout, QHeaderView, QLabel,
@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
 
 from app.domain.service import TreasuryService, format_amount_ru
 from app.errors import ValidationError
+from app.ui.dateedit import EMPTY_MESSAGE, DateError, NullableDateEdit
 from app.ui.theme import (ACCENT, BORDER, CARD_BG, EXPENSE_COLOR, INCOME_COLOR,
                           MUTED, TEXT)
 
@@ -269,15 +270,16 @@ class DashboardTab(QWidget):
         top.addWidget(self.month_combo)
 
         self.lbl_from = QLabel("с")
-        self.start_edit = QLineEdit(dt.date.today().replace(day=1).isoformat())
-        self.start_edit.setPlaceholderText("ДД.ММ.ГГГГ или YYYY-MM-DD")
-        self.start_edit.setMinimumHeight(34)
-        self.start_edit.setFixedWidth(130)
+        # единый компонент даты (FR-05): DD.MM.YYYY + календарь; ошибочный
+        # ввод не превращается молча в отсутствие фильтра (FR-06)
+        self.start_edit = NullableDateEdit(label="", default_today=True)
+        self.start_edit.date_edit.setDate(
+            QDate(dt.date.today().year, dt.date.today().month, 1))
+        self.start_edit._enabled_cb.hide()
         self.lbl_to = QLabel("по")
-        self.end_edit = QLineEdit(dt.date.today().isoformat())
-        self.end_edit.setPlaceholderText("ДД.ММ.ГГГГ или YYYY-MM-DD")
-        self.end_edit.setMinimumHeight(34)
-        self.end_edit.setFixedWidth(130)
+        self.end_edit = NullableDateEdit(label="", default_today=True)
+        self.end_edit.date_edit.setDate(QDate.currentDate())
+        self.end_edit._enabled_cb.hide()
         self.lbl_from.setVisible(False)
         self.start_edit.setVisible(False)
         self.lbl_to.setVisible(False)
@@ -415,21 +417,25 @@ class DashboardTab(QWidget):
             ym = self.month_combo.currentData()
             y, m = int(ym[:4]), int(ym[5:7])
             return f"{ym}-01", f"{ym}-{calendar.monthrange(y, m)[1]:02d}"
-        # custom
-        from app.domain.validators import validate_date
+        # custom — единый модуль дат (FR-04/05/06): некорректная дата даёт
+        # явную ошибку и подсветку поля, а не молчаливое расширение выборки
         errors = {}
-        d1 = self.start_edit.text().strip()
-        d2 = self.end_edit.text().strip()
+        self.start_edit.set_error(False)
+        self.end_edit.set_error(False)
         try:
-            validate_date(d1)
-        except ValidationError as exc:
-            errors.update(exc.errors)
+            d1 = self.start_edit.value()
+        except DateError as exc:
+            d1 = None
+            errors["date_from"] = str(exc)
+            self.start_edit.set_error(True)
         try:
-            validate_date(d2)
-        except ValidationError as exc:
-            errors.update(exc.errors)
+            d2 = self.end_edit.value()
+        except DateError as exc:
+            d2 = None
+            errors["date_to"] = str(exc)
+            self.end_edit.set_error(True)
         if not errors and d1 > d2:
-            errors["period"] = "Начало периода позже его конца"
+            errors["period"] = EMPTY_MESSAGE
         if errors:
             raise ValidationError(errors)
         return d1, d2
